@@ -74,12 +74,18 @@ async def _run(args, config, config_path) -> int:
     from .hardware.linux import LinuxBackend
     from .hardware.mock import MockBackend
     from .runtime import Runtime, source_factory
+    from .mqtt import MQTTAdapter, validate_credentials
 
     backend = None
     lock_fd = None
     installed = []
+    mqtt_adapter = None
+    unsubscribe = None
     loop = asyncio.get_running_loop()
     try:
+        # Local credentials are permanent configuration and must fail before
+        # opening any hardware path. Network reachability remains reconnectable.
+        validate_credentials(config.mqtt)
         if args.backend == 'mock':
             lock_path = args.lock_path or Path('/tmp/ha-nuc9-ec-mock.lock')
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -93,6 +99,15 @@ async def _run(args, config, config_path) -> int:
                                                args.lock_path or Path('/run/lock/ha-nuc9-ec.lock'))
         controller = Controller(config, backend, time.monotonic)
         runtime = Runtime(controller, reader_factory=source_factory(args.sys_root, mock=args.backend == 'mock'))
+        mqtt_adapter = MQTTAdapter(
+            config.mqtt,
+            lambda changes, request_id: asyncio.run_coroutine_threadsafe(
+                controller.change(changes, request_id), loop),
+            device_id=config.device.id,
+        )
+        unsubscribe = controller.subscribe(mqtt_adapter.publish_state)
+        mqtt_adapter.publish_state(controller.snapshot())
+        mqtt_adapter.start()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, runtime.request_stop, sig.name)
             installed.append(sig)
@@ -109,6 +124,10 @@ async def _run(args, config, config_path) -> int:
         print(f'error: {error}', file=sys.stderr)
         return 75
     finally:
+        if unsubscribe is not None:
+            unsubscribe()
+        if mqtt_adapter is not None:
+            mqtt_adapter.stop()
         for sig in installed:
             loop.remove_signal_handler(sig)
         if lock_fd is not None:

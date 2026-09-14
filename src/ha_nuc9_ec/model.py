@@ -35,3 +35,4 @@ class StateSnapshot:
     fault: str | None
     last_cycle_at: float | None
     configuration: dict
+    last_success: dict[str, float]

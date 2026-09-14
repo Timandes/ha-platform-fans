@@ -350,3 +350,29 @@ async def test_fresh_boolean_float_command_rejects_atomically(controller, backen
     assert controller.snapshot().fault is None
     assert backend.operations == [('probe',), ('restore_bios',)]
     await controller.stop('normal')
+
+
+def test_snapshot_retains_last_success_after_source_failure(controller, clock):
+    clock.advance(1)
+    controller.on_sample(Sample('cpu_package', 51, clock(), None))
+    clock.advance(1)
+    controller.on_sample(Sample('cpu_package', None, clock(), 'read failed'))
+    state = controller.snapshot()
+    assert state.sources['cpu_package'].error == 'read failed'
+    assert state.last_success['cpu_package'] == 1
+
+
+@pytest.mark.asyncio
+async def test_reload_source_replacement_does_not_reuse_old_success(controller, clock):
+    await controller.start()
+    clock.advance(1)
+    controller.on_sample(Sample('cpu_package', 51, clock(), None))
+    raw = controller.config.model_dump(mode='python')
+    raw['sources']['cpu_package']['selector']['type'] = 'replacement_cpu'
+    candidate = type(controller.config).model_validate(raw, context={'normalized_duration': True})
+    samples = {'cpu_package': Sample('cpu_package', None, clock(), 'not available'),
+               'pch': Sample('pch', 50, clock(), None)}
+    result = await controller.reload(candidate, 'replace-source', samples=samples)
+    assert result.ok
+    assert 'cpu_package' not in controller.snapshot().last_success
+    await controller.stop('normal')

@@ -48,6 +48,7 @@ class Controller:
         self.backend = backend
         self.clock = clock
         self._samples: dict[str, Sample] = {}
+        self._last_success: dict[str, float] = {}
         self._state = 'starting'
         self._requested = config.control.mode
         self._applied = 'unknown'
@@ -96,10 +97,12 @@ class Controller:
             sources[key] = sample
         return StateSnapshot(self._state, self._requested, self._applied, self._revision,
                              self._duty, self._rpm, sources, self._fault, self._last_cycle,
-                             self._config.model_dump(mode='json'))
+                             self._config.model_dump(mode='json'), copy.deepcopy(self._last_success))
 
     def on_sample(self, sample: Sample) -> None:
         self._samples[sample.source_id] = sample
+        if sample.error is None and sample.celsius is not None:
+            self._last_success[sample.source_id] = sample.read_at
 
     def raise_if_faulted(self) -> None:
         """Propagate the terminal failure category after pending work drains."""
@@ -236,9 +239,17 @@ class Controller:
                 if candidate.device != self._config.device or candidate.mqtt != self._config.mqtt:
                     raise ConfigError('device and MQTT settings require process restart')
                 await self._apply(candidate, self._samples if samples is None else samples)
+                previous_sources = self._config.sources
                 self._config = candidate
                 if samples is not None:
                     self._samples = dict(samples)
+                    self._last_success = {
+                        key: sample.read_at if sample.error is None and sample.celsius is not None else self._last_success[key]
+                        for key, sample in samples.items()
+                        if ((sample.error is None and sample.celsius is not None) or
+                            (key in self._last_success and key in previous_sources and
+                             key in candidate.sources and previous_sources[key] == candidate.sources[key]))
+                    }
                 if commit is not None:
                     commit()
                 self._revision += 1
