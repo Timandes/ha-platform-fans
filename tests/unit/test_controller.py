@@ -294,3 +294,23 @@ async def test_rpm_before_identity_verification_does_not_access_mailbox(controll
         await controller.read_rpm()
     assert backend.operations == []
     await controller.stop('normal')
+
+
+@pytest.mark.asyncio
+async def test_request_cache_retains_256_results_and_evicts_oldest(controller, backend):
+    await controller.start()
+    change = {'fans.cpufan.override.fixed.duty_percent': 55}
+    for index in range(256):
+        result = await controller.change(change, f'request-{index}')
+        assert result.ok and result.revision == index + 1
+    # At capacity both the oldest and newest replies remain idempotent.
+    assert (await controller.change(change, 'request-0')).revision == 1
+    assert (await controller.change(change, 'request-255')).revision == 256
+    assert (await controller.change(change, 'request-256')).revision == 257
+    assert (await controller.change(change, 'request-1')).revision == 2
+    # The 257th distinct ID expires the oldest insertion, even if it was read.
+    expired = await controller.change(change, 'request-0')
+    assert expired.ok and expired.revision == 258
+    assert (await controller.change(change, 'request-256')).revision == 257
+    assert backend.operations == [('probe',), ('restore_bios',)]
+    await controller.stop('normal')

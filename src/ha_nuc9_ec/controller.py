@@ -228,8 +228,8 @@ class Controller:
                 result = CommandResult(request_id, False, self._revision, str(error))
             self._results[request_id] = (payload, result)
             # Bound untrusted request IDs. Idempotence is scoped to this process
-            # and its most recent 1024 completed request IDs.
-            if len(self._results) > 1024:
+            # and its most recent 256 completed request IDs.
+            if len(self._results) > 256:
                 self._results.popitem(last=False)
             return result
         return await self._submit('command', operation)
