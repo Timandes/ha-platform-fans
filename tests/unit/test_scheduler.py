@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 
@@ -7,6 +8,7 @@ import pytest
 from ha_nuc9_ec.config import SourceConfig
 from ha_nuc9_ec.model import Sample
 from ha_nuc9_ec.sources.base import Collector, SnapshotCache
+from ha_nuc9_ec.sources.smart import SmartctlReader, StandbySkip
 
 
 def config(provider="thermal_zone", interval="20ms"):
@@ -86,3 +88,59 @@ def test_snapshot_cache_is_thread_safe_and_returns_copy():
     snapshot = cache.snapshot()
     snapshot.clear()
     assert cache.snapshot() == {"cpu": first}
+
+
+@pytest.mark.asyncio
+async def test_standby_skip_keeps_last_success_until_it_ages_stale():
+    class SuccessThenStandby(Reader):
+        def read(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise StandbySkip("device is in standby")
+            return 36.0
+
+    cache = SnapshotCache()
+    source = config("smartctl", "20ms").model_copy(update={"stale_after": 0.05})
+
+    class FastDeadlineCollector(Collector):
+        @property
+        def timeout(self):
+            return 0.05
+
+    task = asyncio.create_task(FastDeadlineCollector(source, SuccessThenStandby("disk")).run(cache.put))
+    try:
+        await asyncio.sleep(0.08)
+        retained = cache.snapshot()["disk"]
+        assert retained.celsius == 36.0
+        assert retained.error is None
+        assert cache.snapshot()["disk"].read_at == retained.read_at
+        assert time.monotonic() - retained.read_at > source.stale_after
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_collector_kills_and_reaps_smartctl(tmp_path):
+    program = tmp_path / "smartctl"
+    program.write_text("#!/bin/sh\nexec /bin/sleep 10\n")
+    program.chmod(0o755)
+    source = config("smartctl")
+    reader = SmartctlReader("disk", source, executable=program, timeout=5.0)
+    collector = Collector(source, reader)
+    task = asyncio.create_task(collector.run(lambda _: None))
+    for _ in range(100):
+        with reader._lock:
+            process = reader._process
+        if process is not None:
+            break
+        await asyncio.sleep(0.005)
+    assert process is not None
+    pid = process.pid
+    task.cancel()
+    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 0.3)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
+    assert process.returncode is not None

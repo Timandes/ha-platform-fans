@@ -1,1 +1,1 @@
-{"smartctl":{"version":[7,3],"exit_status":1},"messages":[{"string":"Smartctl open device failed"}]}
+{"smartctl":{"version":[7,3],"exit_status":2},"messages":[{"string":"Smartctl open device failed"}]}

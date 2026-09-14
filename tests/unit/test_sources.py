@@ -5,7 +5,7 @@ import pytest
 
 from ha_nuc9_ec.config import SourceConfig
 from ha_nuc9_ec.sources.base import SourceReadError
-from ha_nuc9_ec.sources.smart import SmartctlReader
+from ha_nuc9_ec.sources.smart import SmartctlReader, StandbySkip
 from ha_nuc9_ec.sources.sysfs import SysfsReader, resolve_sysfs
 from ha_nuc9_ec.cli import main
 
@@ -79,19 +79,32 @@ def executable(tmp_path, body):
     return path
 
 
+def fixture_text(name):
+    return (Path(__file__).parents[1] / "fixtures" / "smartctl" / name).read_text().strip()
+
+
 def test_smartctl_uses_json_device_type_and_accepts_health_bits(tmp_path):
     args_file = tmp_path / "args"
-    program = executable(tmp_path, f"printf '%s\\n' \"$@\" > {args_file}\nprintf '%s' '{{\"temperature\":{{\"current\":37}}}}'\nexit 8\n")
+    program = executable(tmp_path, f"printf '%s\\n' \"$@\" > {args_file}\nprintf '%s' '{fixture_text('temperature-with-health-bit.json')}'\nexit 8\n")
     config = source("smartctl", {"device": "/dev/disk/by-id/disk-a", "device_type": "sat"}, kind="smart", skip_standby=True)
     assert SmartctlReader("disk", config, executable=program).read() == 37.0
     assert args_file.read_text().splitlines() == ["--json", "--device", "sat", "--nocheck", "standby,3,5", "/dev/disk/by-id/disk-a"]
 
 
-def test_smartctl_standby_is_unavailable_not_zero(tmp_path):
-    program = executable(tmp_path, "printf '%s' '{\"smartctl\":{\"exit_status\":2},\"messages\":[{\"string\":\"Device is in STANDBY mode\"}]}'\nexit 2\n")
+def test_smartctl_status_3_is_a_distinct_standby_skip(tmp_path):
+    program = executable(tmp_path, f"printf '%s' '{fixture_text('standby.json')}'\nexit 3\n")
     config = source("smartctl", {"device": "/dev/disk/by-id/disk-a", "device_type": "sat"}, kind="smart", skip_standby=True)
-    with pytest.raises(SourceReadError, match="standby"):
+    with pytest.raises(StandbySkip, match="standby"):
         SmartctlReader("disk", config, executable=program).read()
+
+
+@pytest.mark.parametrize(("status", "fixture", "message"), [(2, "error.json", "status 2"), (5, "unsupported.json", "not supported")])
+def test_smartctl_special_failures_are_not_standby(tmp_path, status, fixture, message):
+    program = executable(tmp_path, f"printf '%s' '{fixture_text(fixture)}'\nexit {status}\n")
+    config = source("smartctl", {"device": "/dev/disk/by-id/disk-a", "device_type": "sat"}, kind="smart", skip_standby=True)
+    with pytest.raises(SourceReadError, match=message) as raised:
+        SmartctlReader("disk", config, executable=program).read()
+    assert not isinstance(raised.value, StandbySkip)
 
 
 def test_smartctl_start_failure_uses_source_error(tmp_path):

@@ -7,7 +7,11 @@ import threading
 from pathlib import Path
 
 from ..config import SmartctlSelector, SourceConfig
-from .base import SourceReadError
+from .base import SourceReadError, SourceSkipped
+
+
+class StandbySkip(SourceSkipped):
+    pass
 
 
 class SmartctlReader:
@@ -51,8 +55,10 @@ class SmartctlReader:
             payload = json.loads(stdout)
         except (json.JSONDecodeError, UnboundLocalError) as error:
             raise SourceReadError(f"invalid smartctl JSON: {stderr.strip()}") from error
-        if self.source.skip_standby and process.returncode == 2:
-            raise SourceReadError("device is in standby or smartctl could not check it")
+        if self.source.skip_standby and process.returncode == 3:
+            raise StandbySkip("device is in standby")
+        if self.source.skip_standby and process.returncode == 5:
+            raise SourceReadError("smartctl standby check is not supported")
         if process.returncode & 0b111:
             raise SourceReadError(f"smartctl command failed with status {process.returncode}")
         value = payload.get("temperature", {}).get("current")

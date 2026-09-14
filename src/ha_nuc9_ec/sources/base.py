@@ -15,6 +15,10 @@ class SourceReadError(RuntimeError):
     pass
 
 
+class SourceSkipped(SourceReadError):
+    """A deliberate read skip that must not replace the cached sample."""
+
+
 class SourceReader(Protocol):
     source_id: str
 
@@ -46,7 +50,7 @@ class Collector:
     def timeout(self) -> float:
         return {"thermal_zone": 0.1, "hwmon": 0.2, "smartctl": 5.0}[self.source.provider]
 
-    async def _read_once(self) -> Sample:
+    async def _read_once(self) -> Sample | None:
         if self._pending is None:
             self._pending = self._executor.submit(self.reader.read)
         future = self._pending
@@ -60,6 +64,9 @@ class Collector:
             return Sample(self.reader.source_id, None, time.monotonic(), "read timed out")
         except asyncio.CancelledError:
             raise
+        except SourceSkipped:
+            self._pending = None
+            return None
         except Exception as error:
             self._pending = None
             message = str(error) or error.__class__.__name__
@@ -69,7 +76,9 @@ class Collector:
         next_due = time.monotonic()
         try:
             while True:
-                publish(await self._read_once())
+                sample = await self._read_once()
+                if sample is not None:
+                    publish(sample)
                 next_due += self.source.poll_interval
                 now = time.monotonic()
                 if next_due < now:
