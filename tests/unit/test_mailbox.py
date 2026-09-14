@@ -14,18 +14,22 @@ class FakePort:
         self.values = {0x10: 0}
         self.responses: dict[int, deque[int]] = {}
         self.logical_writes: list[tuple[int, int]] = []
+        self.trace: list[tuple] = []
         self.corrupt_parameter_readback = False
 
     def read_byte(self, address: int) -> int:
         assert address == 0x591
         if self.selected in self.responses and self.responses[self.selected]:
-            return self.responses[self.selected].popleft()
-        value = self.values.get(self.selected, 0)
-        if self.corrupt_parameter_readback and self.selected in (0x11, 0x12):
-            return value ^ 1
+            value = self.responses[self.selected].popleft()
+        else:
+            value = self.values.get(self.selected, 0)
+            if self.corrupt_parameter_readback and self.selected in (0x11, 0x12):
+                value ^= 1
+        self.trace.append(("read", address, value))
         return value
 
     def write_byte(self, address: int, value: int) -> None:
+        self.trace.append(("write", address, value))
         if address == 0x590:
             self.selected = value
         else:
@@ -44,7 +48,22 @@ def fake_port():
 def test_set_duty_uses_atomic_parameter_readback_sequence(fake_port):
     mailbox = Mailbox(fake_port, sleep=lambda _: None)
     mailbox.set_duty(DutyPair(80, 40))
-    assert fake_port.logical_writes == [(0x11, 80), (0x12, 40), (0x10, 0x0D)]
+    assert fake_port.trace == [
+        ("write", 0x590, 0x10),
+        ("read", 0x591, 0),
+        ("write", 0x590, 0x11),
+        ("write", 0x591, 80),
+        ("write", 0x590, 0x12),
+        ("write", 0x591, 40),
+        ("write", 0x590, 0x11),
+        ("read", 0x591, 80),
+        ("write", 0x590, 0x12),
+        ("read", 0x591, 40),
+        ("write", 0x590, 0x10),
+        ("write", 0x591, 0x0D),
+        ("write", 0x590, 0x10),
+        ("read", 0x591, 0),
+    ]
 
 
 def test_readback_mismatch_never_commits(fake_port):
@@ -68,8 +87,18 @@ def test_real_mailbox_rejects_unverified_or_non_integer_duty(fake_port, pair):
 
 
 def test_restore_waits_for_idle_acknowledgement(fake_port):
+    fake_port.responses[0x10] = deque([0, 0x0E, 0])
     Mailbox(fake_port, sleep=lambda _: None).restore_bios()
-    assert fake_port.logical_writes == [(0x10, 0x0E)]
+    assert fake_port.trace == [
+        ("write", 0x590, 0x10),
+        ("read", 0x591, 0),
+        ("write", 0x590, 0x10),
+        ("write", 0x591, 0x0E),
+        ("write", 0x590, 0x10),
+        ("read", 0x591, 0x0E),
+        ("write", 0x590, 0x10),
+        ("read", 0x591, 0),
+    ]
 
 
 def test_rpm_response_is_stable_and_big_endian(fake_port):
