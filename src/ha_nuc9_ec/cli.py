@@ -5,14 +5,16 @@ import asyncio
 import fcntl
 import os
 import signal
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from .config import ConfigError, load_config
-from .model import Sample
+from .health import DEFAULT_HEALTH_PATH, check_health, write_health
+from .model import Sample, StateSnapshot
 from .policy import SourceUnavailable, calculate
 
 
@@ -49,6 +51,8 @@ def _discover(sys_root: Path) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ha-nuc9-ec")
     commands = parser.add_subparsers(dest="command", required=True)
+    health = commands.add_parser('health', help='read controller health without accessing hardware')
+    health.add_argument('--health-path', type=Path, default=DEFAULT_HEALTH_PATH)
     validate = commands.add_parser("validate", help="validate configuration without opening hardware")
     validate.add_argument("config", type=Path, nargs="?")
     validate.add_argument("--config", dest="config_option", type=Path)
@@ -65,10 +69,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--backend", choices=("mock", "linux"), default="linux")
     run.add_argument("--sys-root", type=Path, default=Path("/sys"))
     run.add_argument("--lock-path", type=Path)
+    run.add_argument("--health-path", type=Path, help="Linux process health snapshot (default: /run/ha-nuc9-ec/health.json)")
     return parser
 
 
-async def _run(args, config, config_path) -> int:
+async def _run(args, config, config_path, publish_health=lambda state: None) -> int:
     from .controller import Controller, PermanentFailure, TemporaryFailure
     from .hardware.base import HardwareError, PreflightError
     from .hardware.linux import LinuxBackend
@@ -81,6 +86,7 @@ async def _run(args, config, config_path) -> int:
     installed = []
     mqtt_adapter = None
     unsubscribe = None
+    unsubscribe_health = None
     loop = asyncio.get_running_loop()
     try:
         # Local credentials are permanent configuration and must fail before
@@ -98,6 +104,7 @@ async def _run(args, config, config_path) -> int:
             backend = await asyncio.to_thread(LinuxBackend.open, args.sys_root,
                                                args.lock_path or Path('/run/lock/ha-nuc9-ec.lock'))
         controller = Controller(config, backend, time.monotonic)
+        unsubscribe_health = controller.subscribe(publish_health)
         runtime = Runtime(controller, reader_factory=source_factory(args.sys_root, mock=args.backend == 'mock'))
         mqtt_adapter = MQTTAdapter(
             config.mqtt,
@@ -125,6 +132,8 @@ async def _run(args, config, config_path) -> int:
         print(f'error: {error}', file=sys.stderr)
         return 75
     finally:
+        if unsubscribe_health is not None:
+            unsubscribe_health()
         if unsubscribe is not None:
             unsubscribe()
         if mqtt_adapter is not None:
@@ -140,7 +149,23 @@ async def _run(args, config, config_path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    health_path = None
+    instance_id = uuid.uuid4().hex
+    initial = StateSnapshot('starting', 'bios', 'unknown', 0, None, None, {}, None, None, {}, {})
+    def publish_health(state):
+        if health_path is not None:
+            write_health(health_path, state, instance_id)
     try:
+        if args.command == 'health':
+            result = check_health(args.health_path, time.monotonic())
+            print(json.dumps(asdict(result)))
+            return 0 if result.status in ('healthy', 'starting') else 1
+        if args.command == 'run':
+            if sys.platform == 'linux':
+                health_path = args.health_path or DEFAULT_HEALTH_PATH
+            elif args.backend != 'mock' or args.health_path is not None:
+                raise ConfigError('process health requires Linux; non-Linux mock runs omit --health-path')
+            publish_health(initial)
         if args.command == "discover":
             _discover(args.sys_root)
             return 0
@@ -149,7 +174,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigError('a configuration path is required')
         config = load_config(config_path)
         if args.command == 'run':
-            return asyncio.run(_run(args, config, config_path))
+            code = asyncio.run(_run(args, config, config_path, publish_health))
+            publish_health(replace(initial, state='permanent_failure' if code == 78 else 'stopped'))
+            return code
         if args.command == "validate":
             print("configuration is valid")
             return 0
@@ -162,6 +189,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"cpu": result.cpu, "sys": result.sys}, separators=(",", ":")))
         return 0
     except (ConfigError, SourceUnavailable, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+        if health_path is not None:
+            try:
+                publish_health(replace(initial, state='permanent_failure'))
+            except OSError:
+                pass
         print(f"error: {error}", file=sys.stderr)
         return 78 if args.command == "run" else 2
 
