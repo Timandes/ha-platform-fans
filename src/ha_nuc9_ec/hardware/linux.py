@@ -101,9 +101,9 @@ class LinuxBackend(Backend):
                 os.close(port_fd)
             if lock_fd >= 0:
                 os.close(lock_fd)
-            if isinstance(exc, PreflightError):
+            if isinstance(exc, HardwareError):
                 raise
-            if isinstance(exc, (HardwareError, OSError)):
+            if isinstance(exc, OSError):
                 raise PreflightError(f"hardware preflight failed: {exc}") from exc
             raise
 

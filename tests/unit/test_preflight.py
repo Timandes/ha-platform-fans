@@ -156,3 +156,19 @@ def test_port_io_rejects_short_write(monkeypatch, tmp_path):
             LinuxPortIO(fd).write_byte(0x590, 0x10)
     finally:
         os.close(fd)
+
+
+def test_startup_mailbox_busy_is_temporary_and_releases_lock(monkeypatch, platform_root):
+    sys_root, dev_root, _ = platform_root
+    lock_path = sys_root.parent / 'lock'
+    def busy(self):
+        raise HardwareError('mailbox busy timeout')
+    monkeypatch.setattr('ha_nuc9_ec.hardware.linux.Mailbox.read_version', busy)
+    with pytest.raises(HardwareError, match='busy') as caught:
+        LinuxBackend.open(sys_root, lock_path, dev_root=dev_root)
+    assert not isinstance(caught.value, PreflightError)
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import fcntl
+import os
+import signal
+from dataclasses import asdict
 import json
 import sys
 import time
@@ -45,7 +50,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ha-nuc9-ec")
     commands = parser.add_subparsers(dest="command", required=True)
     validate = commands.add_parser("validate", help="validate configuration without opening hardware")
-    validate.add_argument("config", type=Path)
+    validate.add_argument("config", type=Path, nargs="?")
+    validate.add_argument("--config", dest="config_option", type=Path)
     evaluate = commands.add_parser("evaluate", help="evaluate override policy from a JSON sample snapshot")
     evaluate.add_argument("config", type=Path)
     evaluate.add_argument("samples", type=Path, help="JSON object keyed by source ID")
@@ -53,7 +59,63 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--bounds", nargs=2, type=int, metavar=("MIN", "MAX"), default=(40, 80))
     discover = commands.add_parser("discover", help="list stable local sysfs temperature selectors")
     discover.add_argument("--sys-root", type=Path, default=Path("/sys"))
+    run = commands.add_parser("run", help="run the fan controller", description="SIGHUP reloads file policy/sources; device/MQTT changes require process restart.")
+    run.add_argument("config", type=Path, nargs="?")
+    run.add_argument("--config", dest="config_option", type=Path)
+    run.add_argument("--backend", choices=("mock", "linux"), default="linux")
+    run.add_argument("--sys-root", type=Path, default=Path("/sys"))
+    run.add_argument("--lock-path", type=Path)
     return parser
+
+
+async def _run(args, config, config_path) -> int:
+    from .controller import Controller, PermanentFailure, TemporaryFailure
+    from .hardware.base import HardwareError, PreflightError
+    from .hardware.linux import LinuxBackend
+    from .hardware.mock import MockBackend
+    from .runtime import Runtime, source_factory
+
+    backend = None
+    lock_fd = None
+    installed = []
+    loop = asyncio.get_running_loop()
+    try:
+        if args.backend == 'mock':
+            lock_path = args.lock_path or Path('/tmp/ha-nuc9-ec-mock.lock')
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise PreflightError('hardware lock is already held') from error
+            backend = MockBackend()
+        else:
+            backend = await asyncio.to_thread(LinuxBackend.open, args.sys_root,
+                                               args.lock_path or Path('/run/lock/ha-nuc9-ec.lock'))
+        controller = Controller(config, backend, time.monotonic)
+        runtime = Runtime(controller, reader_factory=source_factory(args.sys_root, mock=args.backend == 'mock'))
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, runtime.request_stop, sig.name)
+            installed.append(sig)
+        loop.add_signal_handler(signal.SIGHUP, runtime.reload_event.set)
+        installed.append(signal.SIGHUP)
+        await runtime.run(config_path=config_path,
+                          on_ready=lambda state: print(json.dumps({'event': 'ready', 'backend': args.backend, 'state': state.state}), flush=True),
+                          on_reload=lambda result: print(json.dumps({'event': 'reload', **asdict(result)}), flush=True))
+        return 0
+    except (ConfigError, PreflightError, PermanentFailure, OSError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 78
+    except (HardwareError, TemporaryFailure) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 75
+    finally:
+        for sig in installed:
+            loop.remove_signal_handler(sig)
+        if lock_fd is not None:
+            os.close(lock_fd)
+        if isinstance(backend, MockBackend):
+            operations = [[item[0], *[asdict(value) if hasattr(value, '__dataclass_fields__') else value for value in item[1:]]] for item in backend.operations]
+            print(json.dumps({'backend': 'mock', 'operations': operations}), flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,7 +124,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "discover":
             _discover(args.sys_root)
             return 0
-        config = load_config(args.config)
+        config_path = getattr(args, 'config_option', None) or args.config
+        if config_path is None:
+            raise ConfigError('a configuration path is required')
+        config = load_config(config_path)
+        if args.command == 'run':
+            return asyncio.run(_run(args, config, config_path))
         if args.command == "validate":
             print("configuration is valid")
             return 0
@@ -76,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (ConfigError, SourceUnavailable, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
-        return 2
+        return 78 if args.command == "run" else 2
 
 
 if __name__ == "__main__":
