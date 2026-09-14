@@ -1,15 +1,18 @@
 """Strict MQTT commands and nonblocking Paho network adapter."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import queue
 import ssl
 import threading
 import time
+import re
+import uuid
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import asdict
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,6 +25,12 @@ from .model import CommandResult, StateSnapshot
 
 class CommandRejected(ValueError):
     pass
+
+
+_PUBLIC_PATH = re.compile(
+    r"(?:control\.mode|fans\.(?:cpufan|sysfan)\.override\.(?:mode|fixed\.duty_percent|"
+    r"inputs\.\d+\.(?:custom\.(?:minimum_temperature_c|minimum_duty_percent|duty_increment_percent_per_c)|boost_above_c)))\Z"
+)
 
 
 def _object(pairs):
@@ -49,6 +58,9 @@ def parse_command(topic: str, payload: bytes, retained: bool) -> tuple[str, dict
             raise CommandRejected("command requires only request_id and changes")
         if not isinstance(body["request_id"], str) or not body["request_id"] or not isinstance(body["changes"], dict):
             raise CommandRejected("invalid request_id or changes")
+        for path in body["changes"]:
+            if not isinstance(path, str) or _PUBLIC_PATH.fullmatch(path) is None:
+                raise CommandRejected(f"{path}: path is not allowed")
         return body["request_id"], body["changes"]
     marker = "/command/"
     if marker not in topic:
@@ -65,8 +77,8 @@ def parse_command(topic: str, payload: bytes, retained: bool) -> tuple[str, dict
         elif rest == "fixed_duty_percent":
             path, kind = f"fans.{fan}.override.fixed.duty_percent", "int"
         else:
-            index, suffix = rest.split("_", 1)
-            path = f"fans.{fan}.override.inputs.{index}." + (suffix if suffix == "boost_above_c" else f"custom.{suffix}")
+            source_token, suffix = rest.split("_", 1)
+            path = f"fans.{fan}.override.inputs.source:{source_token}." + (suffix if suffix == "boost_above_c" else f"custom.{suffix}")
             kind = "int" if suffix == "minimum_duty_percent" else "float"
     if path is None:
         raise CommandRejected("unknown command entity")
@@ -77,25 +89,33 @@ def parse_command(topic: str, payload: bytes, retained: bool) -> tuple[str, dict
             raise ValueError
     except (UnicodeDecodeError, ValueError) as error:
         raise CommandRejected("invalid scalar payload") from error
-    digest = hashlib.sha256(topic.encode() + b"\0" + payload).hexdigest()[:24]
-    return f"ha-{digest}", {path: value}
+    return f"ha-{uuid.uuid4().hex}", {path: value}
 
 
 def re_fullmatch_entity(entity: str):
-    import re
-    match = re.fullmatch(r"(cpufan|sysfan)_(override_mode|fixed_duty_percent|input_(\d+)_(minimum_temperature_c|minimum_duty_percent|duty_increment_percent_per_c|boost_above_c))", entity)
+    match = re.fullmatch(r"(cpufan|sysfan)_(override_mode|fixed_duty_percent|input_source_([0-9a-f]+)_(minimum_temperature_c|minimum_duty_percent|duty_increment_percent_per_c|boost_above_c))", entity)
     if not match:
         return None
     rest = match.group(2)
     if rest.startswith("input_"):
+        try:
+            bytes.fromhex(match.group(3)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
         rest = f"{match.group(3)}_{match.group(4)}"
     return match.group(1), rest
 
 
-def validate_credentials(config: MQTTConfig) -> str | None:
+@dataclass(frozen=True)
+class PreparedMQTT:
+    password: str | None
+    ssl_context: ssl.SSLContext | None
+
+
+def prepare_mqtt(config: MQTTConfig) -> PreparedMQTT:
     """Read local secrets before hardware is opened; never include them in errors."""
     if not config.enabled:
-        return None
+        return PreparedMQTT(None, None)
     password = None
     if config.password_file:
         try:
@@ -103,36 +123,62 @@ def validate_credentials(config: MQTTConfig) -> str | None:
         except OSError as error:
             raise ValueError(f"cannot read MQTT password file {config.password_file}") from error
     parsed = urlsplit(config.broker)
+    context = None
     if parsed.scheme == "ssl":
         if config.tls is None:
             raise ValueError("ssl MQTT broker requires TLS configuration")
-        for label, path in (("CA", config.tls.ca_file), ("certificate", config.tls.certificate_file), ("key", config.tls.key_file)):
-            if path and not Path(path).is_file():
-                raise ValueError(f"MQTT TLS {label} file is not readable")
+        try:
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=config.tls.ca_file)
+            context.check_hostname = True
+            context.verify_mode = ssl.CERT_REQUIRED
+            if config.tls.certificate_file:
+                context.load_cert_chain(config.tls.certificate_file, config.tls.key_file, password="")
+        except (OSError, ssl.SSLError) as error:
+            raise ValueError("invalid MQTT TLS certificate configuration") from error
     elif config.tls is not None:
         raise ValueError("MQTT TLS configuration requires an ssl broker URL")
-    return password
+    return PreparedMQTT(password, context)
+
+
+def validate_credentials(config: MQTTConfig) -> str | None:
+    """Compatibility helper; new callers should retain prepare_mqtt's context."""
+    return prepare_mqtt(config).password
 
 
 class MQTTAdapter:
     """Paho owns network I/O; a bounded worker queue isolates controller work."""
-    def __init__(self, config: MQTTConfig, submit, *, device_id: str | None = None):
+    def __init__(self, config: MQTTConfig, submit, *, device_id: str | None = None,
+                 prepared: PreparedMQTT | None = None):
         self.config = config.model_copy(deep=True)
         self.submit = submit
         self.device_id = device_id
+        self._prepared = prepared
         self._password: str | None = None
-        self._queue: queue.Queue = queue.Queue(maxsize=256)
+        self._commands: queue.Queue = queue.Queue(maxsize=256)
+        self._results: deque[dict] = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._client: mqtt.Client | None = None
         self._latest: StateSnapshot | None = None
+        self._state_dirty = False
+        self._connected = False
+        self._online = False
+        self._resync = False
+        self._birth = False
+        self._generation = 0
+        self._packet_ids: dict[tuple[int, int], str] = {}
         self._discovery_topics: set[str] = set()
+        self._discovery_fingerprint: str | None = None
         self._wall_anchor = time.time() - time.monotonic()
 
     def start(self) -> None:
         if not self.config.enabled or self._client is not None:
             return
-        self._password = validate_credentials(self.config)
+        if self._prepared is None:
+            self._prepared = prepare_mqtt(self.config)
+        self._password = self._prepared.password
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.config.client_id,
                              clean_session=True, protocol=mqtt.MQTTv311)
         client.max_queued_messages_set(256)
@@ -141,15 +187,13 @@ class MQTTAdapter:
             client.username_pw_set(self.config.username, self._password)
         parsed = urlsplit(self.config.broker)
         if parsed.scheme == "ssl":
-            tls = self.config.tls
-            assert tls is not None
-            client.tls_set(ca_certs=tls.ca_file, certfile=tls.certificate_file, keyfile=tls.key_file,
-                           cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS_CLIENT)
-            client.tls_insecure_set(False)
+            assert self._prepared.ssl_context is not None
+            client.tls_set_context(self._prepared.ssl_context)
         prefix = self.config.topic_prefix
         client.will_set(f"{prefix}/availability", "offline", qos=1, retain=True)
         client.reconnect_delay_set(min_delay=1, max_delay=30)
         client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
         client.on_message = self._on_message
         self._client = client
         self._worker = threading.Thread(target=self._work, name="mqtt-adapter", daemon=True)
@@ -157,22 +201,12 @@ class MQTTAdapter:
         client.connect_async(parsed.hostname, parsed.port)
         client.loop_start()
 
-    def _put(self, item) -> None:
-        try:
-            self._queue.put_nowait(item)
-        except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                logging.warning("MQTT adapter queue remains full; update dropped")
-
     def publish_state(self, state: StateSnapshot) -> None:
         if self.config.enabled:
-            self._put(("state", state))
+            with self._lock:
+                self._latest = state
+                self._state_dirty = True
+            self._wake.set()
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         if reason_code != 0:
@@ -180,42 +214,98 @@ class MQTTAdapter:
             return
         prefix = self.config.topic_prefix
         client.subscribe([(f"{prefix}/set", 1), (f"{prefix}/command/+", 1), ("homeassistant/status", 1)])
-        self._put(("connected", None))
+        with self._lock:
+            self._connected = True
+            self._online = False
+            self._resync = True
+            self._generation += 1
+            self._packet_ids.clear()
+        self._wake.set()
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        with self._lock:
+            self._connected = False
+            self._online = False
+        self._wake.set()
 
     def _on_message(self, client, userdata, message):
-        self._put(("message", (message.topic, bytes(message.payload), bool(message.retain))))
-
-    def _publish(self, topic: str, payload, *, retain: bool) -> None:
-        client = self._client
-        if client is None:
+        if message.topic == "homeassistant/status":
+            if bytes(message.payload) == b"online":
+                with self._lock:
+                    self._birth = True
+                self._wake.set()
             return
+        item = (message.topic, bytes(message.payload), bool(message.retain), message.mid, bool(message.dup))
+        try:
+            self._commands.put_nowait(item)
+        except queue.Full:
+            result = json.dumps({"request_id": None, "ok": False, "error": "command queue is full",
+                                 "revision": self._latest.revision if self._latest else 0}, separators=(",", ":"))
+            info = client.publish(f"{self.config.topic_prefix}/result", result, qos=1, retain=False)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                logging.error("MQTT command overload result could not be queued")
+        self._wake.set()
+
+    def _publish(self, topic: str, payload, *, retain: bool) -> bool:
+        client = self._client
+        with self._lock:
+            connected = self._connected
+        if client is None or not connected:
+            return False
         if not isinstance(payload, (str, bytes)):
             payload = json.dumps(payload, separators=(",", ":"), allow_nan=False)
-        client.publish(topic, payload, qos=1, retain=retain)
+        info = client.publish(topic, payload, qos=1, retain=retain)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            return False
+        try:
+            info.wait_for_publish(timeout=2)
+        except (RuntimeError, ValueError):
+            return False
+        return info.is_published()
 
     def _state_payload(self, state: StateSnapshot) -> dict:
-        data = asdict(state)
-        duty = data.pop("duty")
-        data["target_duty"] = None if duty is None else {"cpu": duty["cpu"], "sys": duty["sys"]}
+        duty = asdict(state.duty) if state.duty is not None else None
+        data = {
+            "state": state.state,
+            "requested_mode": state.requested_mode,
+            "applied_mode": state.applied_mode,
+            "revision": state.revision,
+            "target_duty": duty,
+            "rpm": state.rpm,
+            "sources": {key: asdict(value) for key, value in state.sources.items()},
+            "fault": state.fault,
+            "configuration": {
+                "control": {"mode": state.configuration["control"]["mode"]},
+                "fans": state.configuration["fans"],
+            },
+        }
         for source_id, sample in data["sources"].items():
             last = state.last_success.get(source_id)
             sample["last_success_at"] = None if last is None else time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._wall_anchor + last))
         return data
 
-    def _announce(self, state: StateSnapshot) -> None:
+    def _announce(self, state: StateSnapshot, *, force_discovery: bool = False) -> bool:
         from .config import AppConfig
         config = AppConfig.model_validate(state.configuration, context={"normalized_duration": True})
-        messages = build_discovery(config) if config.mqtt.discovery.enabled else {}
-        for removed in self._discovery_topics - messages.keys():
-            self._publish(removed, b"", retain=True)
-        for topic, payload in messages.items():
-            self._publish(topic, payload, retain=True)
-        self._discovery_topics = set(messages)
-        self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True)
+        fingerprint = json.dumps(state.configuration, sort_keys=True, separators=(",", ":"))
+        if force_discovery or fingerprint != self._discovery_fingerprint:
+            messages = build_discovery(config) if config.mqtt.discovery.enabled else {}
+            for removed in self._discovery_topics - messages.keys():
+                if not self._publish(removed, b"", retain=True):
+                    return False
+            for topic, payload in messages.items():
+                if not self._publish(topic, payload, retain=True):
+                    return False
+            self._discovery_topics = set(messages)
+            self._discovery_fingerprint = fingerprint
+        if not self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True):
+            return False
         for source_id, sample in state.sources.items():
-            self._publish(f"{self.config.topic_prefix}/source/{source_id}/availability",
-                          "online" if sample.error is None else "offline", retain=True)
+            if not self._publish(f"{self.config.topic_prefix}/source/{source_id.encode('utf-8').hex()}/availability",
+                                 "online" if sample.error is None else "offline", retain=True):
+                return False
+        return True
 
     def _complete(self, request_id: str, changes: dict[str, object]) -> None:
         try:
@@ -227,42 +317,69 @@ class MQTTAdapter:
         except Exception as error:
             revision = self._latest.revision if self._latest else 0
             result = CommandResult(request_id, False, revision, str(error))
-        self._publish(f"{self.config.topic_prefix}/result", asdict(result), retain=False)
+        with self._lock:
+            self._results.append(asdict(result))
+
+    def _handle_command(self, item) -> None:
+        topic, payload, retained, mid, duplicate = item
+        try:
+            request_id, changes = parse_command(topic, payload, retained)
+            if "/command/" in topic:
+                with self._lock:
+                    key = (self._generation, mid)
+                    if duplicate and key in self._packet_ids:
+                        request_id = self._packet_ids[key]
+                    else:
+                        self._packet_ids[key] = request_id
+                        if len(self._packet_ids) > 512:
+                            self._packet_ids.pop(next(iter(self._packet_ids)))
+            self._complete(request_id, changes)
+        except CommandRejected as error:
+            with self._lock:
+                self._results.append({"request_id": None, "ok": False, "error": str(error),
+                                      "revision": self._latest.revision if self._latest else 0})
 
     def _work(self) -> None:
         last_periodic = time.monotonic()
         while not self._stop.is_set():
-            try:
-                kind, value = self._queue.get(timeout=.5)
-            except queue.Empty:
-                if self._latest and time.monotonic() - last_periodic >= 5:
-                    self._publish(f"{self.config.topic_prefix}/state", self._state_payload(self._latest), retain=True)
-                    last_periodic = time.monotonic()
-                continue
-            if kind == "state":
-                self._latest = value
-                self._announce(value)
-            elif kind == "connected":
-                if self._latest:
-                    self._announce(self._latest)
-                    self._publish(f"{self.config.topic_prefix}/availability", "online", retain=True)
-            elif kind == "message":
-                topic, payload, retained = value
-                if topic == "homeassistant/status":
-                    if payload == b"online" and self._latest:
-                        self._announce(self._latest)
-                    continue
+            self._wake.wait(.1)
+            self._wake.clear()
+            for _ in range(32):
+                with self._lock:
+                    if len(self._results) >= 512:
+                        break
                 try:
-                    self._complete(*parse_command(topic, payload, retained))
-                except CommandRejected as error:
-                    self._publish(f"{self.config.topic_prefix}/result",
-                                  {"request_id": None, "ok": False, "error": str(error),
-                                   "revision": self._latest.revision if self._latest else 0}, retain=False)
+                    self._handle_command(self._commands.get_nowait())
+                except queue.Empty:
+                    break
+            now = time.monotonic()
+            with self._lock:
+                connected, state = self._connected, self._latest
+                force = self._resync or self._birth
+                dirty = self._state_dirty
+                due = now - last_periodic >= 5
+            if connected and state is not None and (force or dirty or due):
+                if self._announce(state, force_discovery=force):
+                    with self._lock:
+                        self._resync = self._birth = self._state_dirty = False
+                    last_periodic = now
+                    if not self._online and self._publish(f"{self.config.topic_prefix}/availability", "online", retain=True):
+                        with self._lock:
+                            self._online = True
+            while connected:
+                with self._lock:
+                    result = self._results[0] if self._results else None
+                if result is None or not self._publish(f"{self.config.topic_prefix}/result", result, retain=False):
+                    break
+                with self._lock:
+                    if self._results and self._results[0] is result:
+                        self._results.popleft()
 
     def stop(self) -> None:
         if not self.config.enabled:
             return
         self._stop.set()
+        self._wake.set()
         client = self._client
         if client:
             self._publish(f"{self.config.topic_prefix}/availability", "offline", retain=True)

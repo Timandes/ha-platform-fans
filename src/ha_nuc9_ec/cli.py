@@ -74,7 +74,7 @@ async def _run(args, config, config_path) -> int:
     from .hardware.linux import LinuxBackend
     from .hardware.mock import MockBackend
     from .runtime import Runtime, source_factory
-    from .mqtt import MQTTAdapter, validate_credentials
+    from .mqtt import MQTTAdapter, prepare_mqtt
 
     backend = None
     lock_fd = None
@@ -85,7 +85,7 @@ async def _run(args, config, config_path) -> int:
     try:
         # Local credentials are permanent configuration and must fail before
         # opening any hardware path. Network reachability remains reconnectable.
-        validate_credentials(config.mqtt)
+        prepared_mqtt = prepare_mqtt(config.mqtt)
         if args.backend == 'mock':
             lock_path = args.lock_path or Path('/tmp/ha-nuc9-ec-mock.lock')
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -104,6 +104,7 @@ async def _run(args, config, config_path) -> int:
             lambda changes, request_id: asyncio.run_coroutine_threadsafe(
                 controller.change(changes, request_id), loop),
             device_id=config.device.id,
+            prepared=prepared_mqtt,
         )
         unsubscribe = controller.subscribe(mqtt_adapter.publish_state)
         mqtt_adapter.publish_state(controller.snapshot())
@@ -117,7 +118,7 @@ async def _run(args, config, config_path) -> int:
                           on_ready=lambda state: print(json.dumps({'event': 'ready', 'backend': args.backend, 'state': state.state}), flush=True),
                           on_reload=lambda result: print(json.dumps({'event': 'reload', **asdict(result)}), flush=True))
         return 0
-    except (ConfigError, PreflightError, PermanentFailure, OSError) as error:
+    except (ConfigError, PreflightError, PermanentFailure, OSError, ValueError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 78
     except (HardwareError, TemporaryFailure) as error:

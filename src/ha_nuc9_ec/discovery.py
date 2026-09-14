@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import re
+import json
 
 from .config import AppConfig
 
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_")
+
+
+def _token(value: str) -> str:
+    return value.encode("utf-8").hex()
 
 
 def build_discovery(config: AppConfig) -> dict[str, dict]:
@@ -43,13 +48,13 @@ def build_discovery(config: AppConfig) -> dict[str, dict]:
             unit_of_measurement="%", value_template=f"{{{{ value_json.target_duty.{fan.removesuffix('fan')} | default(none) }}}}")
         inputs = getattr(config.fans, fan).override.inputs
         for item in inputs:
-            source_slug = _slug(item.source)
-            # Topics retain the current index needed by apply_changes, while identity
-            # follows the logical source so reordering inputs does not recreate entities.
+            source_slug = _token(item.source)
+            # State templates use the current index, while command identity follows
+            # the logical source and is resolved inside Controller's transaction.
             index = next(i for i, value in enumerate(inputs) if value.source == item.source)
             base = f"{fan}_input_{source_slug}"
             path_base = f"configuration.fans.{fan}.override.inputs.{index}"
-            command_base = f"{fan}_input_{index}"
+            command_base = f"{fan}_input_source_{source_slug}"
             if item.custom is not None:
                 for suffix, label, unit, low, high, step in (
                     ("minimum_temperature_c", "minimum temperature", "°C", -100, 200, .1),
@@ -69,12 +74,13 @@ def build_discovery(config: AppConfig) -> dict[str, dict]:
     for source_id in config.sources:
         if not config.sources[source_id].enabled:
             continue
-        entity = f"source_{_slug(source_id)}"
+        entity = f"source_{_token(source_id)}"
+        source_key = json.dumps(source_id)
         add("sensor", f"{entity}_temperature", f"{source_id} temperature", unit_of_measurement="°C",
-            value_template=f"{{{{ value_json.sources.{source_id}.celsius | default(none) }}}}",
-            availability=[{"topic": f"{prefix}/availability"}, {"topic": f"{prefix}/source/{source_id}/availability"}],
+            value_template=f"{{{{ value_json.sources[{source_key}].celsius | default(none) }}}}",
+            availability=[{"topic": f"{prefix}/availability"}, {"topic": f"{prefix}/source/{_token(source_id)}/availability"}],
             availability_mode="all")
         add("sensor", f"{entity}_last_success", f"{source_id} last successful sample",
-            device_class="timestamp", value_template=f"{{{{ value_json.sources.{source_id}.last_success_at | default(none) }}}}")
+            device_class="timestamp", value_template=f"{{{{ value_json.sources[{source_key}].last_success_at | default(none) }}}}")
     add("sensor", "fault", "Controller fault", value_template="{{ value_json.fault | default('') }}")
     return result

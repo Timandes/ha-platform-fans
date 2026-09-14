@@ -114,3 +114,85 @@ verification, worker shutdown, and diff whitespace. Corrected source discovery
 to avoid mixing HA's singular `availability_topic` with its availability list,
 bounded Paho's internal offline queue, and cleared old last-success history when
 a logical source is replaced.
+
+## Review fix round 1
+
+Addressed all seven Important findings from `task-5-review.md` in one follow-up
+change:
+
+1. Scalar commands now receive a fresh operation ID. The adapter separately maps
+   MQTT QoS retransmission (`connection generation`, packet ID, DUP) to the same
+   operation ID, while independent ABA operations and failure retries execute.
+   Explicit JSON request IDs retain Controller's existing deduplication contract.
+2. JSON command parsing has an explicit public dot-path allowlist. External state
+   is assembled from an explicit telemetry allowlist and contains no broker,
+   client ID, username, password path, CA, certificate, or key configuration.
+3. Discovery command topics encode source IDs as reversible UTF-8 hex. Controller
+   resolves that stable source identity to the current input index inside its
+   serialized configuration transaction, rejecting a removed source. A reload
+   reorder test proves the intended source is updated.
+4. Replaced the shared drop-oldest queue with a coalesced latest-state slot,
+   preserved connection flags, a bounded command queue, bounded result
+   backpressure, connection resync state, and publish acceptance/ack checks.
+   Discovery publishes only for configuration changes, birth, and connection.
+   State publication uses a monotonic five-second deadline even under continuous
+   command traffic. Reconnect publishes the coalesced latest state before online;
+   a connection that precedes its first state waits to publish online.
+5. `prepare_mqtt` reads the password and constructs a reusable verifying
+   `SSLContext` before hardware opens. Client certificate/key loading passes an
+   explicit empty password so encrypted keys cannot invoke an interactive prompt.
+   The adapter receives that prepared object and never reparses files during
+   reconnect. Bad CA and mismatched key tests return 78 and prove
+   `LinuxBackend.open` was never called; errors contain no certificate contents.
+6. Source-derived entity IDs and availability topics use collision-free reversible
+   hex encoding. Jinja templates use JSON-escaped bracket access, preserving source
+   IDs containing punctuation without collisions or invalid dot lookup.
+7. The broker integration now uses a real Controller and asserts every specified
+   scenario against ephemeral Mosquitto 2.0.22: explicit same-ID replay/conflict,
+   scalar ABA and failure retry, HA birth discovery/state count increases, local
+   Controller tick while the broker is stopped, 400 offline state updates coalesced
+   to the newest revision before online on reconnect, SIGKILL of a separate adapter
+   process causing broker-generated LWT, late first state before online, different
+   source stale windows, and reload removal via empty retained discovery followed
+   by a new subscriber receiving no deleted config. Continuous rejected command
+   traffic also proves the five-second state publication is not starved.
+
+Minor fixture findings were also fixed: broker lookup prefers `MOSQUITTO_BIN`, then
+`PATH`, then the brief's local binary; all clients, subprocesses, adapters, and
+controller loops use `finally` cleanup.
+
+### Review RED evidence
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache /Users/timandes/.local/bin/uv run pytest tests/unit/test_mqtt_commands.py tests/unit/test_discovery.py -q`
+
+Result before fixes: **9 failed, 9 passed**. Failures demonstrated repeated scalar
+IDs, absent public-path filtering, index-bound source commands, and colliding source
+discovery IDs/templates.
+
+The previous report's broker gaps were treated as failing acceptance criteria;
+the expanded broker tests initially exposed an incorrect readiness predicate that
+accepted source availability in place of global online. Tightening it to the exact
+global topic produced the expected RED (`availability` absent at the asserted
+position) until the test synchronized on the correct contract.
+
+### Review GREEN evidence
+
+Final affected regression command (the full suite was intentionally not repeated
+for this review-only fix):
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache MOSQUITTO_BIN=/private/tmp/mosquitto-2.0.22/src/mosquitto /Users/timandes/.local/bin/uv run pytest tests/unit/test_mqtt_commands.py tests/unit/test_mqtt_preflight.py tests/unit/test_discovery.py tests/unit/test_controller.py tests/integration/test_mqtt_broker.py tests/integration/test_mock_run.py -q`
+
+Result: **59 passed in 16.86s**, no skips or warnings shown.
+
+Focused real-broker run before the final combined run: `tests/integration/test_mqtt_broker.py`
+reported **5 passed in 7.46s**; the final combined run contains six broker tests
+after adding the late-first-state regression. `git diff --check` passed.
+
+### Review self-check
+
+Re-read the complete fix diff for topic identity, serialized resolution, public
+payload contents, TLS reuse, queue bounds, publish retry state, connection timing,
+result lifetime, cleanup, and retained deletion. Corrected a stale source-index
+comment and encoded per-source availability topics consistently with discovery.
+No physical hardware, NAS access, source transfer, or full-suite repetition was
+performed in this fix round.

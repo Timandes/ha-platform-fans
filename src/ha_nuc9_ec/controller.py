@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import re
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -267,7 +268,27 @@ class Controller:
 
     async def change(self, changes: dict[str, object], request_id: str) -> CommandResult:
         changes = copy.deepcopy(changes)
-        return await self._configuration_command(lambda: apply_changes(self._config, changes), request_id, ('change', changes))
+        def candidate():
+            resolved = {}
+            for path, value in changes.items():
+                match = re.fullmatch(
+                    r"fans\.(cpufan|sysfan)\.override\.inputs\.source:([0-9a-f]+)\."
+                    r"(custom\.(?:minimum_temperature_c|minimum_duty_percent|duty_increment_percent_per_c)|boost_above_c)",
+                    path)
+                if match is None:
+                    resolved[path] = value
+                    continue
+                try:
+                    source_id = bytes.fromhex(match.group(2)).decode('utf-8')
+                except (ValueError, UnicodeDecodeError) as error:
+                    raise ConfigError(f'{path}: invalid source identity') from error
+                inputs = getattr(self._config.fans, match.group(1)).override.inputs
+                indices = [index for index, item in enumerate(inputs) if item.source == source_id]
+                if len(indices) != 1:
+                    raise ConfigError(f'{path}: source is no longer an existing fan input')
+                resolved[f'fans.{match.group(1)}.override.inputs.{indices[0]}.{match.group(3)}'] = value
+            return apply_changes(self._config, resolved)
+        return await self._configuration_command(candidate, request_id, ('change', changes))
 
     async def reload(self, config: AppConfig, request_id: str, *, samples: dict[str, Sample] | None = None,
                      commit: Callable[[], None] | None = None) -> CommandResult:

@@ -376,3 +376,19 @@ async def test_reload_source_replacement_does_not_reuse_old_success(controller, 
     assert result.ok
     assert 'cpu_package' not in controller.snapshot().last_success
     await controller.stop('normal')
+
+
+@pytest.mark.asyncio
+async def test_source_bound_command_resolves_after_input_reorder(controller):
+    await controller.start()
+    raw = controller.config.model_dump(mode='python')
+    raw['fans']['sysfan']['override']['inputs'].reverse()
+    candidate = type(controller.config).model_validate(raw, context={'normalized_duration': True})
+    assert (await controller.reload(candidate, 'reorder')).ok
+    token = 'pch'.encode().hex()
+    path = f'fans.sysfan.override.inputs.source:{token}.custom.minimum_temperature_c'
+    assert (await controller.change({path: 42.0}, 'stable-source')).ok
+    values = {item.source: item.custom.minimum_temperature_c for item in controller.config.fans.sysfan.override.inputs}
+    assert values['pch'] == 42.0
+    assert values['cpu_package'] == 50.0
+    await controller.stop('normal')
