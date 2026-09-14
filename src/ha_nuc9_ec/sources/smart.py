@@ -28,7 +28,7 @@ class SmartctlReader:
         self._process: subprocess.Popen[str] | None = None
 
     def read(self) -> float:
-        arguments = [self.executable, "--json"]
+        arguments = [self.executable, "--json", "--attributes"]
         if self.selector.device_type is not None:
             arguments += ["--device", self.selector.device_type]
         if self.source.skip_standby:

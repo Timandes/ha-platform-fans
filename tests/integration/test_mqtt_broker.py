@@ -445,3 +445,47 @@ def test_per_source_staleness_and_reload_delete_retained_discovery(broker):
             newcomer.loop_stop(); newcomer.disconnect()
     finally:
         unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()
+
+
+
+def test_real_broker_extreme_finite_curve_command_saturates_atomically(broker):
+    example_config = load_config(Path(__file__).parents[2] / "config" / "example.yaml")
+    raw = example_config.model_dump(mode="python")
+    raw["mqtt"].update(enabled=True, broker=f"tcp://127.0.0.1:{broker}", username=None, password_file=None)
+    config = type(example_config).model_validate(raw, context={"normalized_duration": True})
+    controlled = ControllerLoop(config)
+    adapter = MQTTAdapter(config.mqtt, controlled.submit, device_id=config.device.id)
+    unsubscribe = controlled.controller.subscribe(adapter.publish_state)
+    adapter.publish_state(controlled.controller.snapshot())
+    received = []
+    observer = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="extreme-observer", clean_session=True)
+    observer.on_connect = lambda client, userdata, flags, reason, properties: client.subscribe("nuc9/nas11/#", qos=1)
+    observer.on_message = lambda client, userdata, message: received.append((message.topic, bytes(message.payload)))
+    observer.connect("127.0.0.1", broker)
+    observer.loop_start()
+    try:
+        adapter.start()
+        assert wait_until(lambda: ("nuc9/nas11/availability", b"online") in received)
+        changes = {"control.mode": "override", "fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c": 1e308}
+        observer.publish("nuc9/nas11/set", json.dumps({"request_id": "extreme", "changes": changes}), qos=1)
+        assert wait_until(lambda: any(topic.endswith("/result") and json.loads(payload).get("request_id") == "extreme"
+                                      for topic, payload in received))
+        result = next(json.loads(payload) for topic, payload in received
+                      if topic.endswith("/result") and json.loads(payload).get("request_id") == "extreme")
+        assert result["ok"] and result["revision"] == 1
+        state = controlled.controller.snapshot()
+        assert state.revision == 1 and state.duty.cpu == 100 and state.duty.sys == 40 and state.fault is None
+        assert controlled.controller.config.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 1e308
+        # A mixed candidate with an invalid second field cannot partially apply.
+        changes.update({"fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c": 1e307,
+                        "fans.sysfan.override.fixed.duty_percent": 101})
+        observer.publish("nuc9/nas11/set", json.dumps({"request_id": "invalid", "changes": changes}), qos=1)
+        assert wait_until(lambda: any(topic.endswith("/result") and json.loads(payload).get("request_id") == "invalid"
+                                      for topic, payload in received))
+        result = next(json.loads(payload) for topic, payload in received
+                      if topic.endswith("/result") and json.loads(payload).get("request_id") == "invalid")
+        assert not result["ok"] and result["revision"] == 1
+        assert controlled.controller.snapshot().duty == state.duty
+        assert controlled.controller.config.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 1e308
+    finally:
+        unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()

@@ -392,3 +392,54 @@ async def test_source_bound_command_resolves_after_input_reorder(controller):
     assert values['pch'] == 42.0
     assert values['cpu_package'] == 50.0
     await controller.stop('normal')
+
+
+@pytest.mark.asyncio
+async def test_extreme_finite_curve_handles_runtime_warming(example_config, backend, clock):
+    config = apply_changes(example_config, {
+        'control.mode': 'override',
+        'fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c': 1e308,
+    })
+    c = Controller(config, backend, clock)
+    c.on_sample(Sample('cpu_package', 40, clock(), None))
+    c.on_sample(Sample('pch', 40, clock(), None))
+    await c.start()
+    try:
+        assert c.snapshot().duty == DutyPair(40, 40)
+        clock.advance(.1)
+        c.on_sample(Sample('cpu_package', 60, clock(), None))
+        await c.tick()
+        assert c.snapshot().duty == DutyPair(100, 60)
+        assert c.snapshot().state == 'override' and c.snapshot().fault is None
+        assert backend.operations[-1] == ('set_duty', DutyPair(100, 60))
+    finally:
+        await c.stop('SIGTERM')
+
+
+@pytest.mark.asyncio
+async def test_extreme_curve_command_commits_only_after_pair_confirmation(example_config, clock):
+    backend = BlockingBackend()
+    c = Controller(example_config, backend, clock)
+    c.on_sample(Sample('cpu_package', 60, clock(), None))
+    c.on_sample(Sample('pch', 50, clock(), None))
+    await c.start()
+    before = c.snapshot()
+    backend.block_next = True
+    pending = asyncio.create_task(c.change({
+        'control.mode': 'override',
+        'fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c': 1e308,
+    }, 'extreme'))
+    try:
+        assert await asyncio.to_thread(backend.entered.wait, 1)
+        assert c.config == example_config
+        assert c.snapshot().revision == before.revision
+        assert c.snapshot().duty == before.duty
+        backend.release.set()
+        result = await pending
+        assert result.ok and result.revision == 1
+        assert c.config.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 1e308
+        assert c.snapshot().duty == DutyPair(100, 60)
+    finally:
+        backend.release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        await c.stop('SIGTERM')

@@ -51,7 +51,7 @@ SIGHUP 可替换热源、inputs、周期、策略与 runtime。候选采集器�
 
 HA 连接相同 broker，允许控制器发布 Discovery、state/availability/result 及订阅 set/command 和 HA birth。每台设备使用不同 `device.id`、client_id 与 topic_prefix。Discovery 与 state retained，控制和 result 不 retained。broker 不可达时先核查 DNS、路由、端口、账户 ACL、证书链及主机名；不要关闭 TLS 校验来解决证书错误。
 
-JSON 命令发到 `<topic_prefix>/set`，例如 `{"request_id":"ui-1","changes":{"control.mode":"override"}}`，需非 retained；结果从 `/result` 查看 `ok/error/revision`。这是实际硬件控制命令，只有 mock 或已授权实机才使用。整个候选校验通过并经必要邮箱确认才更新；16KiB 上限、未知路径、重复键、非法值和 retained 控制均拒绝。相同 request_id 在最近 256 个结果缓存内幂等回复；HA 标量设值不当作 toggle。重连清洁会话并隔离旧连接命令，避免离线控制重放。
+JSON 命令发到 `<topic_prefix>/set`，例如 `{"request_id":"ui-1","changes":{"control.mode":"override"}}`，需非 retained；结果从 `/result` 查看 `ok/error/revision`。这是实际硬件控制命令，只有 mock 或已授权实机才使用。整个候选校验通过并经必要邮箱确认才更新；16KiB 上限、未知路径、重复键、非法值和 retained 控制均拒绝。相同 request_id 在最近 256 个结果缓存内幂等回复；HA 标量设值不当作 toggle。重连使用清洁会话，避免 broker 的离线持久队列重放控制命令；已退休连接的后续回调不再接收。断线前已经接收并进入应用队列的命令仍会完成，断线不会撤销这些已接受的命令。
 
 ## 监督、故障与权限
 

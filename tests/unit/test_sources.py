@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -83,12 +84,25 @@ def fixture_text(name):
     return (Path(__file__).parents[1] / "fixtures" / "smartctl" / name).read_text().strip()
 
 
-def test_smartctl_uses_json_device_type_and_accepts_health_bits(tmp_path):
+@pytest.mark.parametrize("device_type, protocol, temperature", [("sat", "ATA", 37), ("scsi", "SCSI", 38), ("nvme", "NVMe", 39)])
+def test_smartctl_requests_temperature_and_accepts_health_bits(tmp_path, device_type, protocol, temperature):
     args_file = tmp_path / "args"
-    program = executable(tmp_path, f"printf '%s\\n' \"$@\" > {args_file}\nprintf '%s' '{fixture_text('temperature-with-health-bit.json')}'\nexit 8\n")
-    config = source("smartctl", {"device": "/dev/disk/by-id/disk-a", "device_type": "sat"}, kind="smart", skip_standby=True)
-    assert SmartctlReader("disk", config, executable=program).read() == 37.0
-    assert args_file.read_text().splitlines() == ["--json", "--device", "sat", "--nocheck", "standby,3,5", "/dev/disk/by-id/disk-a"]
+    # Contract fixture: JSON formatting alone requests no temperature data.
+    payload = json.dumps({"json_format_version": [1, 0], "smartctl": {"version": [7, 3], "exit_status": 8},
+                          "device": {"name": "/dev/disk/by-id/disk-a", "type": device_type, "protocol": protocol},
+                          "temperature": {"current": temperature}})
+    program = executable(tmp_path, f"""printf '%s\n' "$@" > {args_file}
+case " $* " in
+  *" --attributes "*) printf '%s' '{payload}'; exit 8 ;;
+  *) printf '%s' '{{"json_format_version":[1,0],"smartctl":{{"version":[7,3],"exit_status":0}}}}' ;;
+esac
+""")
+    without_read = subprocess.run([str(program), "--json", "--device", device_type, "/dev/disk/by-id/disk-a"],
+                                  check=True, capture_output=True, text=True)
+    assert "temperature" not in json.loads(without_read.stdout)
+    config = source("smartctl", {"device": "/dev/disk/by-id/disk-a", "device_type": device_type}, kind="smart", skip_standby=True)
+    assert SmartctlReader("disk", config, executable=program).read() == temperature
+    assert args_file.read_text().splitlines() == ["--json", "--attributes", "--device", device_type, "--nocheck", "standby,3,5", "/dev/disk/by-id/disk-a"]
 
 
 def test_smartctl_status_3_is_a_distinct_standby_skip(tmp_path):

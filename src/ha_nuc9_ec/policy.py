@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from fractions import Fraction
 
 from .config import AppConfig, CurveConfig, FanConfig, InputConfig
 from .model import DutyPair, Sample
@@ -19,10 +20,19 @@ _PRESETS: dict[str, CurveConfig] = {
 PRESET_SOURCE_ID = "QXCFL579.0077"
 
 
-def curve_duty(temp: float, minimum_temp: float, minimum: float, slope: float) -> int:
+def curve_duty(temp: float, minimum_temp: float, minimum: float, slope: float, *, upper: int = 100) -> int:
     if not all(math.isfinite(value) for value in (temp, minimum_temp, minimum, slope)):
         raise ValueError("curve values must be finite")
-    return math.ceil(minimum + max(0.0, temp - minimum_temp) * slope)
+    delta = max(0.0, temp - minimum_temp)
+    if math.isfinite(delta):
+        desired = minimum + delta * slope
+    else:
+        # A positive overflowing difference can still yield a small duty with
+        # a tiny slope. Preserve that result instead of saturating the delta.
+        desired = Fraction(minimum) + (Fraction(temp) - Fraction(minimum_temp)) * Fraction(slope)
+    # Clamp before ceil: finite inputs can overflow the float multiply/add.
+    # Saturating each input commutes with the fan's maximum and final clamp.
+    return math.ceil(min(upper, desired))
 
 
 def _sample(input_config: InputConfig, config: AppConfig, samples: Mapping[str, Sample], now: float) -> Sample:
@@ -51,7 +61,7 @@ def _fan_duty(fan: FanConfig, config: AppConfig, samples: Mapping[str, Sample], 
         if input_config.boost_above_c is not None and sample.celsius >= input_config.boost_above_c:
             boosted = True
         curve = input_config.custom or _PRESETS[override.mode]
-        duties.append(curve_duty(sample.celsius, curve.minimum_temperature_c, curve.minimum_duty_percent, curve.duty_increment_percent_per_c))
+        duties.append(curve_duty(sample.celsius, curve.minimum_temperature_c, curve.minimum_duty_percent, curve.duty_increment_percent_per_c, upper=upper))
     desired = upper if boosted else max(duties)
     return min(upper, max(lower, fan.minimum_running_duty_percent, desired))
 
