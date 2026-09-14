@@ -210,8 +210,11 @@ class MQTTAdapter:
             if self._stop.is_set():
                 return
             self._client = client
-        client.connect_async(parsed.hostname, parsed.port)
-        client.loop_start()
+            # Commit ownership and start atomically against stop's client lookup.
+            # These calls do not wait for callbacks; PUBACK and loop_stop/join
+            # must remain outside this lock.
+            client.connect_async(parsed.hostname, parsed.port)
+            client.loop_start()
 
     def publish_state(self, state: StateSnapshot) -> None:
         if self.config.enabled:

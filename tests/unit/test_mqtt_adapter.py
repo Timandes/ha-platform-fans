@@ -201,3 +201,76 @@ def test_uncertain_old_online_is_not_enqueued_on_fresh_transport(example_config)
     assert new.messages == []
     assert not adapter._publish('nuc9/nas11/availability', 'online', retain=True, expected_generation=1)
     assert new.messages == []
+
+
+def test_stop_during_worker_transport_start_leaves_no_running_loop(example_config, monkeypatch):
+    """A SIGTERM-style stop must own cleanup even while reconnect is starting."""
+    from ha_nuc9_ec.mqtt import mqtt
+
+    adapter = MQTTAdapter(enabled(example_config).mqtt, lambda *_: None)
+    entered, release, stop_reached = threading.Event(), threading.Event(), threading.Event()
+    calls, running = [], []
+
+    class ObservedLock:
+        """Release the startup barrier at contention or at premature cleanup."""
+        def __init__(self):
+            self.lock = threading.Lock()
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                if threading.current_thread().name == 'signal-stop':
+                    stop_reached.set()
+                self.lock.acquire()
+            return self
+        def __exit__(self, *args):
+            self.lock.release()
+
+    adapter._lock = ObservedLock()
+    def connect_async(client, *args):
+        entered.set()
+        assert release.wait(3)
+        calls.append('connect_async')
+    def loop_start(client):
+        calls.append('loop_start')
+        running.append(client)
+    def disconnect(client):
+        calls.append('disconnect')
+    def loop_stop(client):
+        # A callback must still be able to take the adapter lock during join.
+        callback_done = threading.Event()
+        def callback():
+            with adapter._lock:
+                callback_done.set()
+        callback_thread = threading.Thread(target=callback)
+        callback_thread.start()
+        assert callback_done.wait(2)
+        callback_thread.join(2)
+        calls.append('loop_stop')
+        running.clear()
+        stop_reached.set()
+
+    monkeypatch.setattr(mqtt.Client, 'connect_async', connect_async)
+    monkeypatch.setattr(mqtt.Client, 'loop_start', loop_start)
+    monkeypatch.setattr(mqtt.Client, 'disconnect', disconnect)
+    monkeypatch.setattr(mqtt.Client, 'loop_stop', loop_stop)
+    adapter._worker = threading.Thread(target=adapter._work)
+    stopper = threading.Thread(target=adapter.stop, name='signal-stop')
+    adapter._worker.start()
+    adapter._wake.set()
+    try:
+        assert entered.wait(2)
+        stopper.start()
+        assert stop_reached.wait(2)
+        release.set()
+        stopper.join(3)
+        assert not stopper.is_alive()
+        assert not adapter._worker.is_alive()  # Exercise stop's real worker join.
+        assert adapter._client is None
+        assert not running, calls
+        assert calls[-1] == 'loop_stop'
+    finally:
+        release.set()
+        adapter._stop.set()
+        adapter._wake.set()
+        if stopper.ident is not None:
+            stopper.join(3)
+        adapter._worker.join(3)

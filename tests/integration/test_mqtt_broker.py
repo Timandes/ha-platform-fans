@@ -324,19 +324,20 @@ def test_unacked_old_paho_online_outbox_is_retired_before_fresh_transport(restar
     observer.on_message = lambda client, userdata, message: received.append((message.topic, bytes(message.payload)))
     observer.connect('127.0.0.1', restartable_broker.port); observer.loop_start()
     old = adapter._client
-    online_enqueued = threading.Event()
     original_publish = adapter._publish
     def drop_old_online_ack(topic, payload, *, retain, expected_generation=None):
         if topic == 'nuc9/nas11/availability' and payload == 'online' and adapter._client is old:
             old._handle_pubackcomp = lambda command: mqtt.MQTT_ERR_SUCCESS
-            online_enqueued.set()
         return original_publish(topic, payload, retain=retain, expected_generation=expected_generation)
     adapter._publish = drop_old_online_ack
+    def old_online_is_queued():
+        with old._out_message_mutex:
+            return any(message.topic == 'nuc9/nas11/availability' and message.payload == b'online'
+                       for message in old._out_messages.values())
     try:
         adapter.start()
         old = adapter._client
-        assert online_enqueued.wait(5)
-        assert old._out_messages  # actual QoS1 message is still in this Client's outbox
+        assert wait_until(old_online_is_queued, 5)
         restartable_broker.stop()
         adapter.publish_state(dataclasses.replace(controlled.controller.snapshot(), revision=777))
         marker = len(received)
