@@ -173,7 +173,7 @@ class RuntimeConfig(_StrictModel):
 
 
 class AppConfig(_StrictModel):
-    version: Literal[1]
+    version: Annotated[StrictInt, Field(ge=1, le=1)]
     device: DeviceConfig
     control: ControlConfig
     sources: dict[str, SourceConfig] = Field(min_length=1)
@@ -237,8 +237,12 @@ def load_config(path: Path) -> AppConfig:
         return AppConfig.model_validate(data)
     except ConfigError:
         raise
-    except (OSError, yaml.YAMLError) as error:
+    except OSError as error:
         raise ConfigError(str(error)) from error
+    except yaml.YAMLError as error:
+        mark = getattr(error, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        raise ConfigError(f"YAML parse error{location}") from error
     except ValidationError as error:
         raise ConfigError(_format_validation(error)) from error
 

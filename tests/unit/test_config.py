@@ -26,6 +26,13 @@ def test_duplicate_yaml_key_is_rejected(tmp_path, example_path):
         load_config(candidate)
 
 
+def test_boolean_version_is_rejected(tmp_path, example_path):
+    candidate = tmp_path / "boolean-version.yaml"
+    candidate.write_text(example_path.read_text().replace("version: 1", "version: true", 1))
+    with pytest.raises(ConfigError, match="version"):
+        load_config(candidate)
+
+
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
@@ -89,6 +96,13 @@ def test_apply_changes_is_allowlisted_atomic_and_does_not_mutate(example_config)
         apply_changes(example_config, {"fans.cpufan.override.fixed.duty_percent": 101})
     assert example_config.model_dump() == before
 
+    with pytest.raises(ConfigError):
+        apply_changes(example_config, {
+            "control.mode": "override",
+            "fans.sysfan.override.fixed.duty_percent": 101,
+        })
+    assert example_config.model_dump() == before
+
 
 def test_boost_must_be_above_curve_minimum(example_config):
     with pytest.raises(ConfigError, match="boost_above_c"):
@@ -114,4 +128,17 @@ def test_cli_validation_error_does_not_echo_secret(tmp_path, example_path, capsy
     assert main(["validate", str(candidate)]) == 2
     error = capsys.readouterr().err
     assert "mqtt.password" in error
+    assert secret not in error
+
+
+def test_cli_yaml_syntax_error_does_not_echo_source_line(tmp_path, example_path, capsys):
+    candidate = tmp_path / "syntax-secret.yaml"
+    secret = "do-not-print-this-syntax-secret"
+    candidate.write_text(example_path.read_text().replace(
+        "password_file: /run/secrets/mqtt_password",
+        f"password_file: [{secret}",
+    ))
+    assert main(["validate", str(candidate)]) == 2
+    error = capsys.readouterr().err
+    assert "YAML" in error
     assert secret not in error

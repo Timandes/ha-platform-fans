@@ -516,7 +516,8 @@
   "additionalProperties": false,
   "properties": {
     "version": {
-      "const": 1,
+      "maximum": 1,
+      "minimum": 1,
       "title": "Version",
       "type": "integer"
     },

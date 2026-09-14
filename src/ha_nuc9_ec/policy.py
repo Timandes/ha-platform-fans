@@ -58,7 +58,9 @@ def _fan_duty(fan: FanConfig, config: AppConfig, samples: Mapping[str, Sample], 
 
 def calculate(config: AppConfig, samples: Mapping[str, Sample], now: float, bounds: tuple[int, int]) -> DutyPair:
     lower, upper = bounds
-    if isinstance(lower, bool) or isinstance(upper, bool) or not (0 <= lower <= upper <= 100):
+    if not math.isfinite(now):
+        raise SourceUnavailable("policy now must be finite")
+    if type(lower) is not int or type(upper) is not int or not (0 <= lower <= upper <= 100):
         raise ValueError("bounds must be ordered integer percentages within 0..100")
     if config.control.mode != "override":
         raise ValueError("policy calculation requires override mode")

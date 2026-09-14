@@ -66,6 +66,27 @@ def test_missing_error_and_stale_samples_are_unavailable(example_config):
             calculate(cfg, samples, now=10, bounds=(40, 80))
 
 
+@pytest.mark.parametrize("now", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_policy_time_is_unavailable(example_config, now):
+    cfg = apply_changes(example_config, {"control.mode": "override"})
+    with pytest.raises(SourceUnavailable, match="now"):
+        calculate(cfg, {
+            "cpu_package": Sample("cpu_package", 50, 10, None),
+            "pch": Sample("pch", 50, 10, None),
+        }, now=now, bounds=(40, 80))
+
+
+@pytest.mark.parametrize("bounds", [(40.0, 80), (40, 80.0)])
+def test_bounds_require_strict_integers(example_config, bounds):
+    cfg = apply_changes(example_config, {
+        "control.mode": "override",
+        "fans.cpufan.override.mode": "fixed",
+        "fans.sysfan.override.mode": "fixed",
+    })
+    with pytest.raises(ValueError, match="integer"):
+        calculate(cfg, {}, now=10, bounds=bounds)
+
+
 def test_same_temperature_with_recent_read_time_is_valid(example_config):
     cfg = apply_changes(example_config, {"control.mode": "override"})
     result = calculate(cfg, {
