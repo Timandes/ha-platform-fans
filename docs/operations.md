@@ -2,6 +2,19 @@
 
 当前交付是 candidate；命令在项目根目录执行。真实硬件启动须先按 [验收说明](acceptance.md) 获得授权。CLI 实际子命令为 `validate/evaluate/discover/run/health`，没有只读硬件 preflight 子命令。
 
+## 本机模拟的平台差异
+
+macOS 使用 `uv run ha-nuc9-ec run --backend mock --config config/mock.yaml`，不要传 `--health-path`，因为进程健康功能依赖 Linux procfs/pidfd。Linux 默认健康路径 `/run/ha-nuc9-ec/health.json` 通常不可由普通用户创建；在已安装依赖的 Python 环境中（uv 开发环境可先 `. .venv/bin/activate`）运行：
+
+```sh
+NUC9_MOCK_DIR=$(mktemp -d /tmp/ha-nuc9-ec-mock.XXXXXXXX)
+python -m ha_nuc9_ec.cli run --backend mock --config config/mock.yaml --health-path "$NUC9_MOCK_DIR/health.json" --lock-path "$NUC9_MOCK_DIR/device.lock"
+# Ctrl-C 正常停止后清理本次私有目录
+rm -rf -- "$NUC9_MOCK_DIR"
+```
+
+mktemp 创建仅当前用户可访问的目录，避免共享固定路径中的健康文件/模拟锁归属冲突。只有进程退出后才删除该目录；不要删除其他实例使用的锁。容器默认 `/run` tmpfs 和 s6 路径不受此本机模拟步骤影响。
+
 ## 热源发现与身份
 
 ```sh

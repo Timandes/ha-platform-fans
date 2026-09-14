@@ -13,10 +13,24 @@ uv sync --frozen
 uv run ha-nuc9-ec --help
 uv run ha-nuc9-ec validate --config config/example.yaml
 uv run ha-nuc9-ec validate --config config/mock.yaml
+```
+
+macOS 本机模拟不提供 Linux 进程健康文件，启动时不传 `--health-path`：
+
+```sh
 uv run ha-nuc9-ec run --backend mock --config config/mock.yaml
 ```
 
-最后一条常驻运行，以 Ctrl-C 正常停止；mock 使用合成温度并输出硬件操作记录，不访问真实设备。`config/mock.yaml` 默认 override、MQTT 禁用。`config/example.yaml` 展示 MQTT 设置，`config/container.yaml` 则默认 BIOS 且禁用 MQTT。`validate` 只校验配置，不检查实际传感器、密码文件和硬件权限，也不证明温控参数适合设备。JSON Schema 供编辑器提示；跨字段约束仍以 CLI 为准。
+Linux 普通用户先进入已安装依赖的 Python 环境（上述 uv 环境可用 `. .venv/bin/activate`），在私有临时目录存放健康文件和模拟锁：
+
+```sh
+NUC9_MOCK_DIR=$(mktemp -d /tmp/ha-nuc9-ec-mock.XXXXXXXX)
+python -m ha_nuc9_ec.cli run --backend mock --config config/mock.yaml --health-path "$NUC9_MOCK_DIR/health.json" --lock-path "$NUC9_MOCK_DIR/device.lock"
+# Ctrl-C 正常停止后清理本次私有目录
+rm -rf -- "$NUC9_MOCK_DIR"
+```
+
+两种命令均常驻运行，以 Ctrl-C 正常停止；mock 使用合成温度并输出硬件操作记录，不访问真实设备。`config/mock.yaml` 默认 override、MQTT 禁用。`config/example.yaml` 展示 MQTT 设置，`config/container.yaml` 则默认 BIOS 且禁用 MQTT。`validate` 只校验配置，不检查实际传感器、密码文件和硬件权限，也不证明温控参数适合设备。JSON Schema 供编辑器提示；跨字段约束仍以 CLI 为准。
 
 已交付镜像可直接启动模拟容器，无需重建：
 
