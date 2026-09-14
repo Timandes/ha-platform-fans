@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!container/
+!container/**
+!src/
+!src/ha_nuc9_ec/
+!src/ha_nuc9_ec/**
+**/__pycache__
+**/*.pyc

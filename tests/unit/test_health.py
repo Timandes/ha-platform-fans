@@ -151,3 +151,13 @@ def test_starting_published_during_read_rechecks_clock(tmp_path, identity, monke
     monkeypatch.setattr('time.monotonic', lambda: next(clock))
     monkeypatch.setattr(type(path), 'read_text', racing_read)
     assert health.check_health(path, 30).status == 'starting'
+
+
+def test_identity_uses_kernel_thread_group_leader_not_synthetic_self_stat(monkeypatch):
+    # QEMU may synthesize self stat with an exec-time starttime. The leader's
+    # task stat retains the same kernel identity seen by another process.
+    def read(path):
+        value = 100 if str(path) == '/proc/42/task/42/stat' else 200
+        return '42 (name with ) parentheses) S ' + '0 ' * 18 + str(value)
+    monkeypatch.setattr(health.Path, 'read_text', read)
+    assert health.process_starttime(42) == 100

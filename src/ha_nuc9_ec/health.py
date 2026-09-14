@@ -17,7 +17,10 @@ DEFAULT_HEALTH_PATH = Path('/run/ha-nuc9-ec/health.json')
 
 def process_starttime(pid: int) -> int:
     # comm may itself contain spaces and parentheses; field 22 follows it.
-    return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
+    # Read the kernel thread-group leader identity in both writer and monitor.
+    # Emulators can synthesize /proc/self/stat (including /proc/<ownpid>/stat)
+    # with a different exec-time identity than another process sees.
+    return int(Path(f'/proc/{pid}/task/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
 
 
 @dataclass(frozen=True)

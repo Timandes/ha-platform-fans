@@ -1,0 +1,16 @@
+name: ha-nuc9-ec-mock
+services:
+  controller:
+    image: ha-nuc9-ec:local
+    build: .
+    platform: linux/amd64
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      NUC9_BACKEND: mock
+    tmpfs:
+      - /run:rw,nosuid,nodev,exec,size=16m
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+      - ./config/mock.yaml:/config/config.yaml:ro

@@ -1,0 +1,2 @@
+#!/command/with-contenv sh
+exec /opt/venv/bin/ha-nuc9-ec run --config /config/config.yaml --backend "$NUC9_BACKEND"

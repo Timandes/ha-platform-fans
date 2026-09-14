@@ -1,0 +1,25 @@
+name: ha-nuc9-ec
+services:
+  controller:
+    image: ha-nuc9-ec:local
+    build: .
+    platform: linux/amd64
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      NUC9_BACKEND: linux
+    cap_add:
+      - SYS_RAWIO
+    devices:
+      - /dev/port:/dev/port:rw
+      - /dev/mem:/dev/mem:r
+    tmpfs:
+      - /run:rw,nosuid,nodev,exec,size=16m
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+      - ./config/container.yaml:/config/config.yaml:ro
+      - /sys:/sys:ro
+      - /run/lock:/run/lock:rw
+    # When MQTT is enabled, add your password file as a read-only mount:
+    # - /absolute/path/mqtt_password:/run/secrets/mqtt_password:ro

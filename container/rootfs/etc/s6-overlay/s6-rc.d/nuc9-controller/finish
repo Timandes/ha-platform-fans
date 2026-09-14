@@ -1,0 +1,9 @@
+#!/command/with-contenv sh
+# No hardware operations. Permanent errors require explicit service restart.
+if [ "$1" = 78 ]; then
+    exit 125
+fi
+if [ "$1" = 75 ]; then
+    sleep 5
+fi
+exit 0

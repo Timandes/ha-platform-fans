@@ -1,0 +1,84 @@
+version: 1
+device:
+  id: nas11_nuc9
+control:
+  mode: bios
+  decrease_delay: 10s
+sources:
+  cpu_package:
+    kind: cpu
+    provider: thermal_zone
+    selector:
+      type: x86_pkg_temp
+    poll_interval: 100ms
+    stale_after: 500ms
+  pch:
+    kind: sys
+    provider: hwmon
+    selector:
+      name: pch_cannonlake
+      channel: temp1
+    poll_interval: 1s
+    stale_after: 5s
+  disk:
+    enabled: false
+    kind: smart
+    provider: smartctl
+    selector:
+      device: /dev/disk/by-id/REPLACE_WITH_ACTUAL_DISK_ID
+      device_type: sat
+    poll_interval: 30s
+    stale_after: 90s
+    skip_standby: true
+fans:
+  cpufan:
+    minimum_running_duty_percent: 40
+    override:
+      mode: custom
+      fixed:
+        duty_percent: 40
+      combine: max
+      inputs:
+      - source: cpu_package
+        custom:
+          minimum_temperature_c: 47
+          minimum_duty_percent: 40
+          duty_increment_percent_per_c: 2
+        boost_above_c: 75
+      fan_off:
+        enabled: false
+        temperature_c: 0
+  sysfan:
+    minimum_running_duty_percent: 40
+    override:
+      mode: custom
+      fixed:
+        duty_percent: 40
+      combine: max
+      inputs:
+      - source: cpu_package
+        custom:
+          minimum_temperature_c: 50
+          minimum_duty_percent: 40
+          duty_increment_percent_per_c: 2
+      - source: pch
+        custom:
+          minimum_temperature_c: 50
+          minimum_duty_percent: 40
+          duty_increment_percent_per_c: 3
+      fan_off:
+        enabled: false
+        temperature_c: 0
+mqtt:
+  enabled: false
+  broker: tcp://mqtt.example.lan:1883
+  client_id: nas11_nuc9
+  username: nuc9
+  password_file: /run/secrets/mqtt_password
+  topic_prefix: nuc9/nas11
+  discovery:
+    enabled: true
+    prefix: homeassistant
+runtime:
+  shutdown_action: hold
+  sensor_failure_action: max_then_exit

@@ -1,0 +1,2 @@
+#!/command/with-contenv sh
+exec /usr/bin/setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs /opt/venv/bin/python /opt/app/health_monitor.py --service-dir /run/service/nuc9-controller

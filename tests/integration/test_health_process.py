@@ -186,3 +186,21 @@ def test_lock_contender_cannot_replace_frozen_owner_health(tmp_path):
         if owner.poll() is None:
             owner.kill()
         owner.communicate()
+
+
+def test_self_and_external_identity_match_across_delayed_exec():
+    import shlex
+    code = ('import os,time; from ha_nuc9_ec.health import process_starttime; '
+            'print(process_starttime(os.getpid()), flush=True); time.sleep(10)')
+    # Delay before exec guarantees process creation and emulator initialization
+    # occur in different clock ticks, exposing synthetic self-stat identities.
+    command = 'sleep 0.2; exec ' + shlex.join([sys.executable, '-c', code])
+    process = subprocess.Popen(['sh', '-c', command], stdout=subprocess.PIPE, text=True)
+    try:
+        own = int(process.stdout.readline())
+        observed = process_starttime(process.pid)
+        leader = int(Path(f'/proc/{process.pid}/task/{process.pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
+        assert own == observed == leader
+    finally:
+        process.kill()
+        process.wait()

@@ -3,7 +3,7 @@ version: 1
 device:
   id: mock_nuc9
 control:
-  mode: bios
+  mode: override
   decrease_delay: 10s
 sources:
   cpu_package:
