@@ -1,0 +1,558 @@
+{
+  "$defs": {
+    "ControlConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "bios",
+            "override"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "decrease_delay": {
+          "title": "Decrease Delay",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "decrease_delay"
+      ],
+      "title": "ControlConfig",
+      "type": "object"
+    },
+    "CurveConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum_temperature_c": {
+          "title": "Minimum Temperature C",
+          "type": "number"
+        },
+        "minimum_duty_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Minimum Duty Percent",
+          "type": "integer"
+        },
+        "duty_increment_percent_per_c": {
+          "exclusiveMinimum": 0,
+          "title": "Duty Increment Percent Per C",
+          "type": "number"
+        }
+      },
+      "required": [
+        "minimum_temperature_c",
+        "minimum_duty_percent",
+        "duty_increment_percent_per_c"
+      ],
+      "title": "CurveConfig",
+      "type": "object"
+    },
+    "DeviceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "DeviceConfig",
+      "type": "object"
+    },
+    "DiscoveryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "prefix": {
+          "minLength": 1,
+          "title": "Prefix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix"
+      ],
+      "title": "DiscoveryConfig",
+      "type": "object"
+    },
+    "FanConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum_running_duty_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Minimum Running Duty Percent",
+          "type": "integer"
+        },
+        "override": {
+          "$ref": "#/$defs/OverrideConfig"
+        }
+      },
+      "required": [
+        "minimum_running_duty_percent",
+        "override"
+      ],
+      "title": "FanConfig",
+      "type": "object"
+    },
+    "FanOffConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "temperature_c": {
+          "title": "Temperature C",
+          "type": "number"
+        }
+      },
+      "required": [
+        "temperature_c"
+      ],
+      "title": "FanOffConfig",
+      "type": "object"
+    },
+    "FansConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "cpufan": {
+          "$ref": "#/$defs/FanConfig"
+        },
+        "sysfan": {
+          "$ref": "#/$defs/FanConfig"
+        }
+      },
+      "required": [
+        "cpufan",
+        "sysfan"
+      ],
+      "title": "FansConfig",
+      "type": "object"
+    },
+    "FixedConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "duty_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Duty Percent",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "duty_percent"
+      ],
+      "title": "FixedConfig",
+      "type": "object"
+    },
+    "HwmonSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "channel": {
+          "pattern": "^temp[1-9]\\d*$",
+          "title": "Channel",
+          "type": "string"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "pci_address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pci Address"
+        }
+      },
+      "required": [
+        "name",
+        "channel"
+      ],
+      "title": "HwmonSelector",
+      "type": "object"
+    },
+    "InputConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "custom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CurveConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "boost_above_c": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Boost Above C"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "InputConfig",
+      "type": "object"
+    },
+    "MQTTConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "broker": {
+          "pattern": "^(?:tcp|ssl)://[^\\s/]+:\\d{1,5}$",
+          "title": "Broker",
+          "type": "string"
+        },
+        "client_id": {
+          "minLength": 1,
+          "title": "Client Id",
+          "type": "string"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username"
+        },
+        "password_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Password File"
+        },
+        "topic_prefix": {
+          "minLength": 1,
+          "title": "Topic Prefix",
+          "type": "string"
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TLSConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "discovery": {
+          "$ref": "#/$defs/DiscoveryConfig"
+        }
+      },
+      "required": [
+        "enabled",
+        "broker",
+        "client_id",
+        "topic_prefix",
+        "discovery"
+      ],
+      "title": "MQTTConfig",
+      "type": "object"
+    },
+    "OverrideConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "fixed",
+            "custom",
+            "cool",
+            "balanced",
+            "quiet"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "fixed": {
+          "$ref": "#/$defs/FixedConfig"
+        },
+        "combine": {
+          "const": "max",
+          "title": "Combine",
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/InputConfig"
+          },
+          "minItems": 1,
+          "title": "Inputs",
+          "type": "array"
+        },
+        "fan_off": {
+          "$ref": "#/$defs/FanOffConfig"
+        }
+      },
+      "required": [
+        "mode",
+        "fixed",
+        "combine",
+        "inputs",
+        "fan_off"
+      ],
+      "title": "OverrideConfig",
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "shutdown_action": {
+          "enum": [
+            "hold",
+            "restore_bios"
+          ],
+          "title": "Shutdown Action",
+          "type": "string"
+        },
+        "sensor_failure_action": {
+          "const": "max_then_exit",
+          "title": "Sensor Failure Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "shutdown_action",
+        "sensor_failure_action"
+      ],
+      "title": "RuntimeConfig",
+      "type": "object"
+    },
+    "SmartctlSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "pattern": "^/dev/disk/by-id/[^/]+$",
+          "title": "Device",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device"
+      ],
+      "title": "SmartctlSelector",
+      "type": "object"
+    },
+    "SourceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "cpu",
+            "gpu",
+            "sys",
+            "smart"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "thermal_zone",
+            "hwmon",
+            "smartctl"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThermalZoneSelector"
+            },
+            {
+              "$ref": "#/$defs/HwmonSelector"
+            },
+            {
+              "$ref": "#/$defs/SmartctlSelector"
+            }
+          ],
+          "title": "Selector"
+        },
+        "poll_interval": {
+          "title": "Poll Interval",
+          "type": "string"
+        },
+        "stale_after": {
+          "title": "Stale After",
+          "type": "string"
+        },
+        "skip_standby": {
+          "default": false,
+          "title": "Skip Standby",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "selector",
+        "poll_interval",
+        "stale_after"
+      ],
+      "title": "SourceConfig",
+      "type": "object"
+    },
+    "TLSConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_file": {
+          "title": "Ca File",
+          "type": "string"
+        },
+        "certificate_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Certificate File"
+        },
+        "key_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key File"
+        }
+      },
+      "required": [
+        "ca_file"
+      ],
+      "title": "TLSConfig",
+      "type": "object"
+    },
+    "ThermalZoneSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ThermalZoneSelector",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "device": {
+      "$ref": "#/$defs/DeviceConfig"
+    },
+    "control": {
+      "$ref": "#/$defs/ControlConfig"
+    },
+    "sources": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SourceConfig"
+      },
+      "minProperties": 1,
+      "title": "Sources",
+      "type": "object"
+    },
+    "fans": {
+      "$ref": "#/$defs/FansConfig"
+    },
+    "mqtt": {
+      "$ref": "#/$defs/MQTTConfig"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig"
+    }
+  },
+  "required": [
+    "version",
+    "device",
+    "control",
+    "sources",
+    "fans",
+    "mqtt",
+    "runtime"
+  ],
+  "title": "AppConfig",
+  "type": "object"
+}
