@@ -15,6 +15,11 @@ from ha_nuc9_ec.runtime import Runtime
 ROOT = Path(__file__).parents[2]
 
 
+def health_args(tmp_path):
+    # Native macOS mock development has no procfs; Linux retains real health.
+    return ['--health-path', str(tmp_path / 'health.json')] if sys.platform == 'linux' else []
+
+
 def write_config(path, **updates):
     data = yaml.safe_load((ROOT / 'config/example.yaml').read_text())
     data['mqtt']['enabled'] = False
@@ -101,7 +106,7 @@ async def test_runtime_reload_rejects_bad_file_and_startup_fields_then_swaps_sou
 async def test_cli_mock_handles_sigterm_and_sighup_without_hardware(tmp_path):
     path = tmp_path / 'config.yaml'
     write_config(path)
-    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock'), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock'), *health_args(tmp_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         async with asyncio.timeout(5):
             while True:
@@ -128,7 +133,7 @@ async def test_cli_mock_handles_sigterm_and_sighup_without_hardware(tmp_path):
 async def test_cli_invalid_config_exits_permanent_before_device_access(tmp_path):
     path = tmp_path / 'bad.yaml'
     path.write_text('invalid: true')
-    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'linux', '--config', str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'linux', '--config', str(path), *health_args(tmp_path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
     assert process.returncode == 78
     assert b'error' in stderr and b'/dev/port' not in stderr
@@ -168,7 +173,7 @@ async def test_reload_failed_required_candidate_keeps_collecting_old_sources(tmp
 async def test_mock_single_instance_lock_and_release(tmp_path):
     path = tmp_path / 'config.yaml'
     write_config(path)
-    command = [sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock')]
+    command = [sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock'), *health_args(tmp_path)]
     first = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         async with asyncio.timeout(3):
@@ -233,7 +238,7 @@ def test_cli_startup_communication_failure_exits_temporary_without_recovery_writ
     def busy(self):
         raise HardwareError('mailbox busy timeout')
     monkeypatch.setattr(MockBackend, 'probe', busy)
-    code = main(['run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock')])
+    code = main(['run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock'), *health_args(tmp_path)])
     output = capsys.readouterr()
     assert code == 75
     assert 'busy' in output.err

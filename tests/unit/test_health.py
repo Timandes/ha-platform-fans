@@ -15,6 +15,8 @@ def state(**kwargs):
 def identity(monkeypatch):
     monkeypatch.setattr(health, 'process_starttime', lambda pid: 100)
     monkeypatch.setattr(health.os, 'sysconf', lambda name: 10)
+    monkeypatch.setattr('time.monotonic', lambda: 10.0)
+    health._instance_started_at.cache_clear()
 
 
 def test_startup_grace_and_runtime_expiry(tmp_path, identity):
@@ -106,3 +108,46 @@ def test_preflight_observes_new_startup_and_failure_is_terminal(tmp_path, identi
     assert cli.main(['run', 'config.yaml', '--health-path', str(path)]) == 78
     assert observed and observed[0]['state'] == 'starting'
     assert json.loads(path.read_text())['state'] == 'permanent_failure'
+
+
+@pytest.mark.parametrize(('observed_at', 'want'), [(30.25, 'healthy'), (29.75, 'stale'), (32.125, 'stale')])
+def test_cycle_completed_during_health_read_rechecks_clock(tmp_path, identity, monkeypatch, observed_at, want):
+    path = tmp_path / 'health.json'
+    health.write_health(path, state(state='bios', last_cycle_at=29.9), 'a')
+    original_read = type(path).read_text
+    def racing_read(target, *args, **kwargs):
+        if target == path:
+            # This completes after caller captured now=30, before the reader
+            # opens the atomically replaced health file.
+            health.write_health(path, state(state='bios', last_cycle_at=30.125), 'a')
+        return original_read(target, *args, **kwargs)
+    monkeypatch.setattr(type(path), 'read_text', racing_read)
+    monkeypatch.setattr('time.monotonic', lambda: observed_at)
+    assert health.check_health(path, 30).status == want
+
+
+def test_startup_clock_excludes_prior_host_suspend(tmp_path, identity, monkeypatch):
+    path = tmp_path / 'health.json'
+    monkeypatch.setattr(health, 'process_starttime', lambda pid: 1000)
+    monkeypatch.setattr('time.monotonic', lambda: 10.0)
+    health.write_health(path, state(), 'after-suspend')
+    # proc starttime reports BOOTTIME=100s (90s of prior suspension);
+    # startup elapsed must instead use the controller's monotonic clock.
+    assert health.check_health(path, 19.9).status == 'starting'
+    monkeypatch.setattr('time.monotonic', lambda: 19.9)
+    health.write_health(path, state(), 'after-suspend')
+    assert health.check_health(path, 20).status == 'stale'
+
+
+def test_starting_published_during_read_rechecks_clock(tmp_path, identity, monkeypatch):
+    path = tmp_path / 'health.json'
+    health.write_health(path, state(), 'old-start')
+    original_read = type(path).read_text
+    def racing_read(target, *args, **kwargs):
+        if target == path:
+            health.write_health(path, state(), 'new-start')
+        return original_read(target, *args, **kwargs)
+    clock = iter([30.125, 30.25])
+    monkeypatch.setattr('time.monotonic', lambda: next(clock))
+    monkeypatch.setattr(type(path), 'read_text', racing_read)
+    assert health.check_health(path, 30).status == 'starting'

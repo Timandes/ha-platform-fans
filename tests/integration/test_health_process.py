@@ -112,7 +112,9 @@ def test_cli_mock_progress_freeze_and_stop(tmp_path):
         while time.monotonic() < deadline and check_health(path, time.monotonic()).status != 'healthy':
             assert p.poll() is None
             time.sleep(.02)
-        assert check_health(path, time.monotonic()).status == 'healthy', path.read_text()
+        observed_at = time.monotonic()
+        observed = check_health(path, observed_at)
+        assert observed.status == 'healthy', (observed_at, observed, process_starttime(p.pid), path.read_text())
         first = json.loads(path.read_text())
         p.send_signal(signal.SIGSTOP)
         time.sleep(2.1)
@@ -126,7 +128,9 @@ def test_cli_mock_progress_freeze_and_stop(tmp_path):
                 break
             time.sleep(.02)
         assert current['instance_id'] != first['instance_id']
-        assert check_health(path, time.monotonic()).status == 'healthy', path.read_text()
+        observed_at = time.monotonic()
+        observed = check_health(path, observed_at)
+        assert observed.status == 'healthy', (observed_at, observed, process_starttime(p.pid), path.read_text())
         p.terminate()
         out, err = p.communicate(timeout=5)
         assert p.returncode == 0, err
@@ -150,3 +154,35 @@ def test_s6_wantedup_and_stop_race(tmp_path, child, monkeypatch):
     statuses = iter([(True, True, child.pid), (True, False, child.pid)])
     assert not module.check_once(path, lambda: next(statuses))
     assert child.poll() is None
+
+
+def test_lock_contender_cannot_replace_frozen_owner_health(tmp_path):
+    import yaml
+    from ha_nuc9_ec.health import check_health
+    config = yaml.safe_load(Path('config/example.yaml').read_text())
+    config['mqtt']['enabled'] = False
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump(config))
+    path = tmp_path / 'health.json'
+    command = [sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(config_path), '--health-path', str(path), '--lock-path', str(tmp_path / 'lock')]
+    owner = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and check_health(path, time.monotonic()).status != 'healthy':
+            assert owner.poll() is None
+            time.sleep(.02)
+        assert check_health(path, time.monotonic()).status == 'healthy'
+        owner.send_signal(signal.SIGSTOP)
+        # Wait for the stop to take effect before recording the owned snapshot.
+        os.waitpid(owner.pid, os.WUNTRACED)
+        owned = path.read_bytes()
+        contender = subprocess.run(command, capture_output=True, timeout=15)
+        assert contender.returncode == 78
+        assert path.read_bytes() == owned
+        time.sleep(2.1)
+        assert monitor().check_once(path, lambda: (True, True, owner.pid))
+        assert owner.wait(timeout=3) == -signal.SIGKILL
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        owner.communicate()

@@ -150,6 +150,7 @@ async def _run(args, config, config_path, publish_health=lambda state: None) -> 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     health_path = None
+    health_lock_fd = None
     instance_id = uuid.uuid4().hex
     initial = StateSnapshot('starting', 'bios', 'unknown', 0, None, None, {}, None, None, {}, {})
     def publish_health(state):
@@ -162,7 +163,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result.status in ('healthy', 'starting') else 1
         if args.command == 'run':
             if sys.platform == 'linux':
-                health_path = args.health_path or DEFAULT_HEALTH_PATH
+                candidate = args.health_path or DEFAULT_HEALTH_PATH
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                # The health slot has its own lifetime lock, acquired before
+                # configuration or hardware preflight. A losing startup must
+                # never replace another process's progress or terminal state.
+                health_lock_fd = os.open(str(candidate) + '.lock',
+                                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                try:
+                    fcntl.flock(health_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise ConfigError('health slot lock is already held') from error
+                health_path = candidate
             elif args.backend != 'mock' or args.health_path is not None:
                 raise ConfigError('process health requires Linux; non-Linux mock runs omit --health-path')
             publish_health(initial)
@@ -196,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         print(f"error: {error}", file=sys.stderr)
         return 78 if args.command == "run" else 2
+    finally:
+        if health_lock_fd is not None:
+            os.close(health_lock_fd)
 
 
 if __name__ == "__main__":

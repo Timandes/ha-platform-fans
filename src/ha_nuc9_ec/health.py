@@ -5,7 +5,9 @@ import json
 import math
 import os
 import tempfile
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from .model import StateSnapshot
@@ -26,11 +28,19 @@ class HealthResult:
     instance_id: str | None = None
 
 
+@lru_cache(maxsize=128)
+def _instance_started_at(pid: int, starttime: int, instance_id: str) -> float:
+    # One controller instance per process in production. Bounded caching also
+    # supports in-process mock invocations without consulting previous JSON.
+    # /proc starttime uses BOOTTIME, so it must never become a MONOTONIC deadline.
+    return time.monotonic()
+
+
 def write_health(path: Path, state: StateSnapshot, instance_id: str) -> None:
     pid = os.getpid()
     starttime = process_starttime(pid)
     payload = dict(pid=pid, starttime=starttime, instance_id=instance_id,
-                   started_at=starttime / os.sysconf('SC_CLK_TCK'),
+                   started_at=_instance_started_at(pid, starttime, instance_id),
                    last_cycle_at=state.last_cycle_at, state=state.state)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
@@ -61,6 +71,12 @@ def check_health(path: Path, now: float) -> HealthResult:
             return result(data['state'])
         if process_starttime(pid) != starttime:
             return result('stale')
+        reference = started if last is None else last
+        if reference > now:
+            # The caller samples now before we open the JSON. A completed cycle
+            # can be published between those operations. Recheck the clock after
+            # the read; genuinely future or expired timestamps still fail.
+            now = time.monotonic()
         if last is None:
             return result('starting' if data['state'] == 'starting' and 0 <= now - started < 10 else 'stale')
         return result('healthy' if data['state'] in ('bios', 'override') and 0 <= now - last < 2 else 'stale')
