@@ -196,3 +196,75 @@ result lifetime, cleanup, and retained deletion. Corrected a stale source-index
 comment and encoded per-source availability topics consistently with discovery.
 No physical hardware, NAS access, source transfer, or full-suite repetition was
 performed in this fix round.
+
+## Review fix round 2
+
+Read `task-5-rereview.md` and fixed the remaining publication coordination and
+test synchronization findings without changing the five already accepted areas.
+
+- Publication work now captures the state sequence, connection generation, and
+  birth sequence before waiting for PUBACKs. Completion advances only the exact
+  captured sequence. State, birth, or reconnect events that arrive during PUBACK
+  remain pending, and an old connection generation cannot mark a new connection
+  online.
+- Discovery reconciliation records every topic before its publish attempt. A
+  successful retained deletion removes that topic individually; rejected or
+  uncertain attempts remain in the conservative set. Thus a partial addition,
+  disconnect, local removal, and reconnect still deletes every possibly retained
+  entity.
+- Added deterministic PUBACK barriers covering a state arriving during publish
+  and simultaneous birth/new connection generation. Added a deterministic
+  partial-publish, disconnect, remove, reconnect regression.
+- Birth integration waits for both increased discovery and state counts. Outage
+  readiness uses the exact global availability topic. The deleted-discovery
+  newcomer waits for SUBACK and a delivered probe before asserting absence.
+  TLS and newcomer cleanup now runs in `finally`.
+- The qemu-sensitive single-instance fixture now gives each process phase its
+  own bounded timeout: first ready 3s, second rejection 3s, first stop 2s, third
+  ready 3s, and third stop 2s. Product timeouts are unchanged.
+
+### Round 2 RED evidence
+
+The rereview's focused reproduction against `4419821` observed an old revision-0
+announce blocked on PUBACK. Publishing revision 1 during that barrier left
+`_latest.revision == 1` but incorrectly cleared `_state_dirty`; this is the exact
+race encoded by `test_puback_barrier_preserves_newer_state_sequence`. The same
+unconditional flag clear affected birth and reconnect generations. The partial
+discovery regression models a first attempted retained entity followed by a
+failed publish, disconnect, removal, and reconnect; the old all-or-nothing topic
+set could not schedule its deletion. Root's Linux rereview also supplied the
+birth RED: discovery count increased while the immediately asserted state count
+remained 1.
+
+### Round 2 GREEN evidence
+
+Deterministic barriers plus the platform fixture:
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache /Users/timandes/.local/bin/uv run pytest tests/unit/test_mqtt_adapter.py tests/integration/test_mock_run.py::test_mock_single_instance_lock_and_release -q`
+
+Result: **4 passed in 0.34s**.
+
+Real Mosquitto integration after synchronization fixes:
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache MOSQUITTO_BIN=/private/tmp/mosquitto-2.0.22/src/mosquitto /Users/timandes/.local/bin/uv run pytest tests/integration/test_mqtt_broker.py -q`
+
+Result: **6 passed in 14.43s**.
+
+Final affected Mac regression:
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache MOSQUITTO_BIN=/private/tmp/mosquitto-2.0.22/src/mosquitto /Users/timandes/.local/bin/uv run pytest tests/unit/test_mqtt_adapter.py tests/unit/test_mqtt_commands.py tests/unit/test_mqtt_preflight.py tests/unit/test_discovery.py tests/unit/test_controller.py tests/integration/test_mqtt_broker.py tests/integration/test_mock_run.py -q`
+
+Result: **62 passed in 15.65s**, no skips or warnings shown. `git diff --check`
+passed. The full suite was not repeated, as requested.
+
+The agent shell had no `docker` command, so the Linux amd64 testbase command was
+not run here. Root confirmed it will run the affected broker/mock-runtime tests
+on the frozen follow-up commit using the configured private Docker CLI/socket.
+
+### Round 2 self-review
+
+Checked each event update and completion under the adapter lock, verified online
+is guarded by the captured generation, and verified uncertain discovery attempts
+survive until confirmed deletion. Reviewed all edited fixtures for exact-topic
+synchronization, SUBACK/delivery observability, and failure cleanup. No hardware,
+NAS, external network, or broad suite was used.

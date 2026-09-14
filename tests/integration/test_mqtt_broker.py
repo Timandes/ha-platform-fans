@@ -168,8 +168,8 @@ def test_real_broker_birth_state_commands_and_retained_rejection(broker):
         before_birth = sum(topic.endswith("/config") for topic, _, _ in received)
         before_states = sum(topic == "nuc9/nas11/state" for topic, _, _ in received)
         observer.publish("homeassistant/status", "online", qos=1)
-        assert wait_until(lambda: sum(topic.endswith("/config") for topic, _, _ in received) > before_birth)
-        assert sum(topic == "nuc9/nas11/state" for topic, _, _ in received) > before_states
+        assert wait_until(lambda: (sum(topic.endswith("/config") for topic, _, _ in received) > before_birth and
+                                  sum(topic == "nuc9/nas11/state" for topic, _, _ in received) > before_states))
 
         # Explicit JSON IDs deduplicate; a conflicting payload is rejected.
         body = json.dumps({"request_id": "broker-1", "changes": {"control.mode": "override"}})
@@ -223,12 +223,11 @@ def test_real_broker_tls_peer_verification(tls_broker):
     adapter = MQTTAdapter(config.mqtt, lambda changes, request_id: CommandResult(request_id, True, 0))
     controller = Controller(config, MockBackend(), time.monotonic)
     adapter.publish_state(controller.snapshot())
-    adapter.start()
-    deadline = time.monotonic() + 4
-    while time.monotonic() < deadline and not adapter._client.is_connected():
-        time.sleep(.02)
-    assert adapter._client.is_connected()
-    adapter.stop()
+    try:
+        adapter.start()
+        assert wait_until(lambda: adapter._client.is_connected())
+    finally:
+        adapter.stop()
 
 
 def test_first_state_arriving_after_connect_precedes_online(broker):
@@ -274,7 +273,7 @@ def test_broker_outage_keeps_local_cycles_and_reconnects_latest_state_before_onl
     observer.loop_start()
     try:
         adapter.start()
-        assert wait_until(lambda: any(t.endswith('/availability') and p == b'online' for t, p in received))
+        assert wait_until(lambda: any(t == 'nuc9/nas11/availability' and p == b'online' for t, p in received))
         restartable_broker.stop()
         before = controlled.controller.snapshot().last_cycle_at
         controlled.call(controlled.controller.tick()).result(2)
@@ -361,11 +360,24 @@ def test_per_source_staleness_and_reload_delete_retained_discovery(broker):
         topic = f"homeassistant/sensor/{config.device.id}/source_{'pch'.encode().hex()}_temperature/config"
         assert wait_until(lambda: any(t == topic and p == b'' for t, p, _ in received))
         replay = []
+        subscribed, observable = threading.Event(), threading.Event()
+        probe = 'nuc9/nas11/test/subscription-ready'
         newcomer = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='after-delete', clean_session=True)
-        newcomer.on_connect = lambda client, userdata, flags, reason, properties: client.subscribe(topic, 1)
-        newcomer.on_message = lambda client, userdata, message: replay.append(message.payload)
-        newcomer.connect('127.0.0.1', broker); newcomer.loop_start(); time.sleep(.4)
-        newcomer.loop_stop(); newcomer.disconnect()
-        assert replay == []
+        newcomer.on_connect = lambda client, userdata, flags, reason, properties: client.subscribe([(topic, 1), (probe, 1)])
+        newcomer.on_subscribe = lambda client, userdata, mid, reasons, properties: subscribed.set()
+        def newcomer_message(client, userdata, message):
+            if message.topic == topic:
+                replay.append(message.payload)
+            elif message.topic == probe:
+                observable.set()
+        newcomer.on_message = newcomer_message
+        try:
+            newcomer.connect('127.0.0.1', broker); newcomer.loop_start()
+            assert subscribed.wait(3)
+            observer.publish(probe, 'ready', qos=1)
+            assert observable.wait(3)
+            assert replay == []
+        finally:
+            newcomer.loop_stop(); newcomer.disconnect()
     finally:
         unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()

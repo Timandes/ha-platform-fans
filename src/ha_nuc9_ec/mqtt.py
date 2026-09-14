@@ -162,12 +162,14 @@ class MQTTAdapter:
         self._worker: threading.Thread | None = None
         self._client: mqtt.Client | None = None
         self._latest: StateSnapshot | None = None
-        self._state_dirty = False
+        self._state_sequence = 0
+        self._state_done = 0
         self._connected = False
         self._online = False
-        self._resync = False
-        self._birth = False
         self._generation = 0
+        self._synced_generation = 0
+        self._birth_sequence = 0
+        self._birth_done = 0
         self._packet_ids: dict[tuple[int, int], str] = {}
         self._discovery_topics: set[str] = set()
         self._discovery_fingerprint: str | None = None
@@ -205,7 +207,7 @@ class MQTTAdapter:
         if self.config.enabled:
             with self._lock:
                 self._latest = state
-                self._state_dirty = True
+                self._state_sequence += 1
             self._wake.set()
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
@@ -217,7 +219,6 @@ class MQTTAdapter:
         with self._lock:
             self._connected = True
             self._online = False
-            self._resync = True
             self._generation += 1
             self._packet_ids.clear()
         self._wake.set()
@@ -232,7 +233,7 @@ class MQTTAdapter:
         if message.topic == "homeassistant/status":
             if bytes(message.payload) == b"online":
                 with self._lock:
-                    self._birth = True
+                    self._birth_sequence += 1
                 self._wake.set()
             return
         item = (message.topic, bytes(message.payload), bool(message.retain), message.mid, bool(message.dup))
@@ -294,10 +295,13 @@ class MQTTAdapter:
             for removed in self._discovery_topics - messages.keys():
                 if not self._publish(removed, b"", retain=True):
                     return False
+                self._discovery_topics.discard(removed)
             for topic, payload in messages.items():
+                # Once attempted, conservatively remember a topic even if the
+                # PUBACK becomes uncertain; a later target can then delete it.
+                self._discovery_topics.add(topic)
                 if not self._publish(topic, payload, retain=True):
                     return False
-            self._discovery_topics = set(messages)
             self._discovery_fingerprint = fingerprint
         if not self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True):
             return False
@@ -355,17 +359,29 @@ class MQTTAdapter:
             now = time.monotonic()
             with self._lock:
                 connected, state = self._connected, self._latest
-                force = self._resync or self._birth
-                dirty = self._state_dirty
+                generation = self._generation
+                state_sequence = self._state_sequence
+                birth_sequence = self._birth_sequence
+                force = generation != self._synced_generation or birth_sequence != self._birth_done
+                dirty = state_sequence != self._state_done
                 due = now - last_periodic >= 5
             if connected and state is not None and (force or dirty or due):
                 if self._announce(state, force_discovery=force):
                     with self._lock:
-                        self._resync = self._birth = self._state_dirty = False
+                        if self._generation == generation:
+                            self._synced_generation = generation
+                        if self._birth_sequence == birth_sequence:
+                            self._birth_done = birth_sequence
+                        if self._state_sequence == state_sequence:
+                            self._state_done = state_sequence
                     last_periodic = now
-                    if not self._online and self._publish(f"{self.config.topic_prefix}/availability", "online", retain=True):
+                    with self._lock:
+                        may_announce_online = (self._connected and self._generation == generation and
+                                               self._synced_generation == generation and not self._online)
+                    if may_announce_online and self._publish(f"{self.config.topic_prefix}/availability", "online", retain=True):
                         with self._lock:
-                            self._online = True
+                            if self._connected and self._generation == generation:
+                                self._online = True
             while connected:
                 with self._lock:
                     result = self._results[0] if self._results else None

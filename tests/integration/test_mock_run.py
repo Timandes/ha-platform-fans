@@ -171,24 +171,28 @@ async def test_mock_single_instance_lock_and_release(tmp_path):
     command = [sys.executable, '-m', 'ha_nuc9_ec.cli', 'run', '--backend', 'mock', '--config', str(path), '--lock-path', str(tmp_path / 'lock')]
     first = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(3):
             assert b'"event": "ready"' in await first.stdout.readline()
-            second = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        second = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        async with asyncio.timeout(3):
             out, error = await second.communicate()
             assert second.returncode == 78 and b'lock' in error
-            first.send_signal(signal.SIGTERM)
+        first.send_signal(signal.SIGTERM)
+        async with asyncio.timeout(2):
             await first.communicate()
             assert first.returncode == 0
-            third = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            try:
+        third = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            async with asyncio.timeout(3):
                 assert b'"event": "ready"' in await third.stdout.readline()
-                third.send_signal(signal.SIGTERM)
+            third.send_signal(signal.SIGTERM)
+            async with asyncio.timeout(2):
                 await third.communicate()
                 assert third.returncode == 0
-            finally:
-                if third.returncode is None:
-                    third.kill()
-                    await third.wait()
+        finally:
+            if third.returncode is None:
+                third.kill()
+                await third.wait()
     finally:
         if first.returncode is None:
             first.kill()
