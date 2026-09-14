@@ -386,6 +386,20 @@
           "pattern": "^/dev/disk/by-id/[^/]+$",
           "title": "Device",
           "type": "string"
+        },
+        "device_type": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9,+_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Type"
         }
       },
       "required": [

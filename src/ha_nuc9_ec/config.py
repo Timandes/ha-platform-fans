@@ -58,6 +58,7 @@ class HwmonSelector(_StrictModel):
 
 class SmartctlSelector(_StrictModel):
     device: str = Field(pattern=r"^/dev/disk/by-id/[^/]+$")
+    device_type: str | None = Field(default=None, min_length=1, pattern=r"^[A-Za-z0-9,+_-]+$")
 
 
 Selector = ThermalZoneSelector | HwmonSelector | SmartctlSelector
@@ -86,6 +87,8 @@ class SourceConfig(_StrictModel):
             raise ValueError(f"selector does not match provider {self.provider}")
         if self.skip_standby and self.provider != "smartctl":
             raise ValueError("skip_standby is only valid for smartctl")
+        if self.skip_standby and isinstance(self.selector, SmartctlSelector) and self.selector.device_type is None:
+            raise ValueError("skip_standby requires selector.device_type to avoid device autodetection wakeups")
         timeout = {"thermal_zone": 0.1, "hwmon": 0.2, "smartctl": 5.0}[self.provider]
         if self.stale_after <= self.poll_interval + timeout:
             raise ValueError("stale_after must exceed poll_interval plus read timeout")

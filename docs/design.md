@@ -123,7 +123,7 @@ sources:
     enabled: false
     kind: smart
     provider: smartctl
-    selector: {device: /dev/disk/by-id/REPLACE_WITH_ACTUAL_DISK_ID}
+    selector: {device: /dev/disk/by-id/REPLACE_WITH_ACTUAL_DISK_ID, device_type: sat}
     poll_interval: 30s
     stale_after: 90s
     skip_standby: true
