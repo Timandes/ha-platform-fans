@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import threading
 import time
 
@@ -19,23 +20,30 @@ def snapshot(config, revision=0):
     return dataclasses.replace(state, revision=revision)
 
 
+def eventually(predicate, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        threading.Event().wait(.005)
+    return False
+
+
 def test_puback_barrier_preserves_newer_state_sequence(example_config):
     config = enabled(example_config)
     adapter = MQTTAdapter(config.mqtt, lambda *_: None)
     old, new = snapshot(config, 0), snapshot(config, 1)
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    entered, release = threading.Event(), threading.Event()
     revisions = []
-    def announce(state, *, force_discovery=False):
+    def announce(state, *, force_discovery=False, expected_generation=None):
         revisions.append(state.revision)
         if len(revisions) == 1:
             entered.set(); assert release.wait(2)
-        if len(revisions) == 2:
-            finished.set()
         return True
     adapter._announce = announce
     adapter._publish = lambda *args, **kwargs: True
     with adapter._lock:
-        adapter._connected = True; adapter._generation = adapter._synced_generation = 1
+        adapter._client = object(); adapter._connected = True; adapter._generation = adapter._synced_generation = 1
     worker = threading.Thread(target=adapter._work)
     worker.start()
     try:
@@ -43,9 +51,8 @@ def test_puback_barrier_preserves_newer_state_sequence(example_config):
         assert entered.wait(2)
         adapter.publish_state(new)
         release.set()
-        assert finished.wait(2)
+        assert eventually(lambda: adapter._state_done == adapter._state_sequence == 2)
         assert revisions[:2] == [0, 1]
-        assert adapter._state_done == adapter._state_sequence == 2
     finally:
         adapter._stop.set(); adapter._wake.set(); worker.join(2)
 
@@ -53,23 +60,21 @@ def test_puback_barrier_preserves_newer_state_sequence(example_config):
 def test_puback_barrier_preserves_birth_and_new_connection_generation(example_config):
     config = enabled(example_config)
     adapter = MQTTAdapter(config.mqtt, lambda *_: None)
-    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    entered, release = threading.Event(), threading.Event()
     announces, online_generations = [], []
-    def announce(state, *, force_discovery=False):
+    def announce(state, *, force_discovery=False, expected_generation=None):
         announces.append(adapter._generation)
         if len(announces) == 1:
             entered.set(); assert release.wait(2)
-        else:
-            finished.set()
         return True
-    def publish(topic, payload, *, retain):
+    def publish(topic, payload, *, retain, **kwargs):
         if topic.endswith('/availability') and payload == 'online':
             online_generations.append(adapter._generation)
         return True
     adapter._announce, adapter._publish = announce, publish
     with adapter._lock:
         adapter._latest = snapshot(config); adapter._state_sequence = 1
-        adapter._connected = True; adapter._generation = 1
+        adapter._client = object(); adapter._connected = True; adapter._generation = 1
     worker = threading.Thread(target=adapter._work); worker.start(); adapter._wake.set()
     try:
         assert entered.wait(2)
@@ -78,7 +83,8 @@ def test_puback_barrier_preserves_birth_and_new_connection_generation(example_co
             adapter._generation = 2
             adapter._connected = True
         adapter._wake.set(); release.set()
-        assert finished.wait(2)
+        assert eventually(lambda: adapter._birth_done == adapter._birth_sequence and
+                          adapter._synced_generation == 2 and online_generations == [2])
         assert announces[:2] == [1, 2]
         assert online_generations == [2]
         assert adapter._birth_done == adapter._birth_sequence
@@ -95,10 +101,11 @@ def test_partial_publish_disconnect_remove_reconnect_reconciles_discovery(exampl
     adapter = MQTTAdapter(old.mqtt, lambda *_: None)
     adapter._connected = True
     adapter._discovery_topics = set(build_discovery(old))
+    adapter._discovery_fingerprint = json.dumps(old.model_dump(mode='json'), sort_keys=True, separators=(',', ':'))
     new_topics = set(build_discovery(added)) - adapter._discovery_topics
     attempts = []
     failed = [False]
-    def partial(topic, payload, *, retain):
+    def partial(topic, payload, *, retain, **kwargs):
         attempts.append((topic, payload))
         if topic in new_topics and not failed[0]:
             failed[0] = True
@@ -116,6 +123,81 @@ def test_partial_publish_disconnect_remove_reconnect_reconciles_discovery(exampl
         adapter._connected = True
         adapter._generation = 2
     attempts.clear()
-    assert adapter._announce(snapshot(old), force_discovery=True)
+    assert adapter._announce(snapshot(old), force_discovery=False)
     assert all((topic, b'') in attempts for topic in uncertain)
     assert not (adapter._discovery_topics & new_topics)
+
+
+class PublishInfo:
+    rc = 0
+    def __init__(self, entered, release, published=True):
+        self.entered, self.release, self.published = entered, release, published
+    def wait_for_publish(self, timeout=None):
+        self.entered.set()
+        assert self.release.wait(timeout)
+    def is_published(self):
+        return self.published
+
+
+class FakeClient:
+    def __init__(self, info):
+        self.info, self.messages = info, []
+    def publish(self, topic, payload, qos, retain):
+        self.messages.append((topic, payload))
+        return self.info
+
+
+class EnqueueBlockingClient(FakeClient):
+    def __init__(self, info, entered, release):
+        super().__init__(info)
+        self.entered, self.release = entered, release
+    def publish(self, topic, payload, qos, retain):
+        self.entered.set()
+        assert self.release.wait(2)
+        return super().publish(topic, payload, qos, retain)
+
+
+def test_online_enqueue_boundary_is_serialized_with_generation_change(example_config):
+    config = enabled(example_config)
+    adapter = MQTTAdapter(config.mqtt, lambda *_: None)
+    entered, release = threading.Event(), threading.Event()
+    ack_release = threading.Event(); ack_release.set()
+    old = EnqueueBlockingClient(PublishInfo(threading.Event(), ack_release), entered, release)
+    with adapter._lock:
+        adapter._client = old; adapter._connected = True; adapter._generation = 1
+    result = []
+    publishing = threading.Thread(target=lambda: result.append(adapter._publish(
+        'nuc9/nas11/availability', 'online', retain=True, expected_generation=1)))
+    publishing.start(); assert entered.wait(2)
+    changed = threading.Event()
+    def change_generation():
+        with adapter._lock:
+            adapter._generation = 2
+        changed.set()
+    changer = threading.Thread(target=change_generation); changer.start()
+    assert not changed.wait(.05)
+    release.set(); publishing.join(2); changer.join(2)
+    assert result == [True] and changed.is_set()
+
+
+def test_uncertain_old_online_is_not_enqueued_on_fresh_transport(example_config):
+    config = enabled(example_config)
+    adapter = MQTTAdapter(config.mqtt, lambda *_: None)
+    entered, release = threading.Event(), threading.Event()
+    old = FakeClient(PublishInfo(entered, release, published=False))
+    new = FakeClient(PublishInfo(threading.Event(), threading.Event()))
+    with adapter._lock:
+        adapter._client = old; adapter._connected = True; adapter._generation = 1
+    result = []
+    publishing = threading.Thread(target=lambda: result.append(adapter._publish(
+        'nuc9/nas11/availability', 'online', retain=True, expected_generation=1)))
+    publishing.start(); assert entered.wait(2)
+    adapter._retire_transport(old)
+    with adapter._lock:
+        adapter._client = new; adapter._connected = True; adapter._generation = 2
+    release.set(); publishing.join(2)
+    assert result == [False]
+    assert len(old.messages) == 1
+    assert new.messages == []
+    assert not adapter._publish('nuc9/nas11/availability', 'online', retain=True, expected_generation=1)
+    assert new.messages == []

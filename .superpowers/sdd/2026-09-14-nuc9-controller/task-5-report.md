@@ -268,3 +268,80 @@ is guarded by the captured generation, and verified uncertain discovery attempts
 survive until confirmed deletion. Reviewed all edited fixtures for exact-topic
 synchronization, SUBACK/delivery observability, and failure cleanup. No hardware,
 NAS, external network, or broad suite was used.
+
+## Review fix round 3
+
+Read `task-5-rereview2.md` and changed only the two remaining publication edges,
+their deterministic tests, and the Linux command fixture requested by root.
+
+- Paho automatic reconnect is disabled. A disconnected transport is removed from
+  the active slot immediately, its network loop is stopped by the adapter worker,
+  and a completely new Client is created after bounded exponential backoff. The
+  new Client reuses the already prepared TLS context and the configured client ID
+  with a clean session. Application-owned latest state and result queues are the
+  only cross-session retry state.
+- Callbacks verify their originating Client. Received packet identities capture
+  their originating connection generation. `_publish` validates Client identity
+  and expected generation while holding the adapter lock through Paho's actual
+  nonblocking enqueue call; PUBACK waiting remains outside that lock. An old
+  generation therefore cannot enqueue online on a new transport, and unconfirmed
+  QoS1 messages remain confined to the retired Client.
+- Discovery reconciliation now runs when the tracked conservative topic set
+  differs from the current target even when configuration returns to the last
+  successful fingerprint. Any failed/uncertain configuration publish explicitly
+  invalidates that fingerprint.
+- PUBACK barrier tests now wait for the actual adapter completion predicates rather
+  than an event fired inside `_announce` before it returned. New deterministic
+  tests cover the enqueue lock boundary and an uncertain old online operation.
+- The real reconnect test asserts Client identity changes. A test-only PUBACK fault
+  injection suppresses processing for the old Client's online, directly verifies
+  its real Paho `_out_messages` is nonempty, then stops/restarts Mosquitto and
+  verifies a new Client publishes revision 777 state before online. Production
+  code does not inspect or mutate Paho private state.
+- Normal real-Controller broker tests now refresh enabled source samples every
+  100ms by scheduling `Controller.on_sample` on its event loop. Tests specifically
+  about stale sources continue to use an explicitly advanced clock and receive no
+  refresher. Production stale policy and timeouts are unchanged.
+
+### Round 3 RED evidence
+
+Root's focused reproduction against `b5bf6f6` showed an online enqueue after the
+connection changed to generation 2 while generation 1 remained the last synced
+generation. Paho 2.1.0 source inspection further established that an unconfirmed
+QoS1 message stays in the old Client outbox and is reset for resend by automatic
+reconnect despite clean session. The discovery reproduction successfully published
+part of B, failed the next publish, then returned to fingerprint A without force;
+it observed two new attempts and zero deletes. Linux command integration failed
+with `fault override 2 source cpu_package sample is stale`, showing the one-shot
+normal-test fixture aged past the real 500ms limit.
+
+### Round 3 GREEN evidence
+
+Actual unconfirmed old-Paho-outbox fault injection:
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache MOSQUITTO_BIN=/private/tmp/mosquitto-2.0.22/src/mosquitto /Users/timandes/.local/bin/uv run pytest tests/integration/test_mqtt_broker.py::test_unacked_old_paho_online_outbox_is_retired_before_fresh_transport -q -s`
+
+Result: **1 passed in 3.52s**.
+
+Combined affected Mac run:
+
+`UV_CACHE_DIR=/private/tmp/ha-nuc9-uv-cache MOSQUITTO_BIN=/private/tmp/mosquitto-2.0.22/src/mosquitto /Users/timandes/.local/bin/uv run pytest tests/unit/test_mqtt_adapter.py tests/unit/test_mqtt_commands.py tests/unit/test_discovery.py tests/unit/test_controller.py tests/integration/test_mqtt_broker.py tests/integration/test_mock_run.py -q`
+
+Result: **63 passed in 18.90s**, no skips or warnings shown; `git diff --check`
+passed.
+
+After the final self-review guard against a second public `start()` and rejected
+CONNACK retirement, the transport-focused command
+`... uv run pytest tests/unit/test_mqtt_adapter.py tests/integration/test_mqtt_broker.py -q`
+reported **12 passed in 17.86s**.
+
+Root will run the Linux amd64 affected set on the frozen follow-up commit. No full
+suite, hardware, NAS access, or external network was used.
+
+### Round 3 self-review
+
+Verified fresh Client ownership from connect through callback retirement, actual
+enqueue locking, PUBACK lock release, generation-guarded online, packet origin,
+backoff, old loop cleanup, partial topic cleanup on a same-fingerprint return, and
+source refresher shutdown. Added rejected-CONNACK retirement and prevented a
+second public `start()` while a reconnect worker already owns transport lifecycle.

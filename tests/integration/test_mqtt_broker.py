@@ -35,6 +35,18 @@ class ControllerLoop:
             if source.enabled:
                 self.controller.on_sample(Sample(source_id, 50, now, None))
         self.call(self.controller.start()).result(2)
+        self.sample_stop = threading.Event()
+        self.sample_thread = None
+        if clock is time.monotonic:
+            source_ids = [key for key, value in config.sources.items() if value.enabled]
+            def refresh_samples():
+                while not self.sample_stop.wait(.1):
+                    sampled_at = clock()
+                    for source_id in source_ids:
+                        self.loop.call_soon_threadsafe(
+                            self.controller.on_sample, Sample(source_id, 50, sampled_at, None))
+            self.sample_thread = threading.Thread(target=refresh_samples, daemon=True)
+            self.sample_thread.start()
 
     def call(self, coroutine):
         import asyncio
@@ -44,6 +56,9 @@ class ControllerLoop:
         return self.call(self.controller.change(changes, request_id))
 
     def close(self):
+        self.sample_stop.set()
+        if self.sample_thread:
+            self.sample_thread.join(1)
         self.call(self.controller.stop("normal")).result(2)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(2)
@@ -274,6 +289,7 @@ def test_broker_outage_keeps_local_cycles_and_reconnects_latest_state_before_onl
     try:
         adapter.start()
         assert wait_until(lambda: any(t == 'nuc9/nas11/availability' and p == b'online' for t, p in received))
+        old_transport = adapter._client
         restartable_broker.stop()
         before = controlled.controller.snapshot().last_cycle_at
         controlled.call(controlled.controller.tick()).result(2)
@@ -283,12 +299,59 @@ def test_broker_outage_keeps_local_cycles_and_reconnects_latest_state_before_onl
         marker = len(received)
         restartable_broker.start()
         assert wait_until(lambda: sum(t == 'nuc9/nas11/availability' and p == b'online' for t, p in received[marker:]) >= 1, 8)
+        assert adapter._client is not old_transport
         new = received[marker:]
         state_index = next(i for i, (t, p) in enumerate(new) if t == 'nuc9/nas11/state' and json.loads(p)['revision'] == 399)
         online_index = next(i for i, (t, p) in enumerate(new) if t == 'nuc9/nas11/availability' and p == b'online')
         assert state_index < online_index
     finally:
         unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()
+
+
+def test_unacked_old_paho_online_outbox_is_retired_before_fresh_transport(restartable_broker):
+    """Fault injection drops the old Client's PUBACK handling for online.
+
+    Inspecting Paho's outbox is test-only evidence that the QoS1 message really
+    remained unacknowledged; production code never accesses private Paho state.
+    """
+    config = mqtt_config(load_config(Path(__file__).parents[2] / 'config' / 'example.yaml'), restartable_broker.port)
+    controlled = ControllerLoop(config)
+    adapter = MQTTAdapter(config.mqtt, controlled.submit)
+    adapter.publish_state(controlled.controller.snapshot())
+    received = []
+    observer = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='unacked-observer', clean_session=True)
+    observer.on_connect = lambda client, userdata, flags, reason, properties: client.subscribe('nuc9/nas11/#', 1)
+    observer.on_message = lambda client, userdata, message: received.append((message.topic, bytes(message.payload)))
+    observer.connect('127.0.0.1', restartable_broker.port); observer.loop_start()
+    old = adapter._client
+    online_enqueued = threading.Event()
+    original_publish = adapter._publish
+    def drop_old_online_ack(topic, payload, *, retain, expected_generation=None):
+        if topic == 'nuc9/nas11/availability' and payload == 'online' and adapter._client is old:
+            old._handle_pubackcomp = lambda command: mqtt.MQTT_ERR_SUCCESS
+            online_enqueued.set()
+        return original_publish(topic, payload, retain=retain, expected_generation=expected_generation)
+    adapter._publish = drop_old_online_ack
+    try:
+        adapter.start()
+        old = adapter._client
+        assert online_enqueued.wait(5)
+        assert old._out_messages  # actual QoS1 message is still in this Client's outbox
+        restartable_broker.stop()
+        adapter.publish_state(dataclasses.replace(controlled.controller.snapshot(), revision=777))
+        marker = len(received)
+        restartable_broker.start()
+        assert wait_until(lambda: any(t == 'nuc9/nas11/availability' and p == b'online'
+                                      for t, p in received[marker:]), 10)
+        assert adapter._client is not old
+        new = received[marker:]
+        state_index = next(i for i, (topic, payload) in enumerate(new)
+                           if topic == 'nuc9/nas11/state' and json.loads(payload)['revision'] == 777)
+        online_index = next(i for i, item in enumerate(new)
+                            if item == ('nuc9/nas11/availability', b'online'))
+        assert state_index < online_index
+    finally:
+        adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()
 
 
 def test_abrupt_adapter_process_exit_publishes_broker_lwt(broker, tmp_path):

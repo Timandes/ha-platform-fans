@@ -161,6 +161,9 @@ class MQTTAdapter:
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._client: mqtt.Client | None = None
+        self._retired_clients: deque[mqtt.Client] = deque()
+        self._retry_at = 0.0
+        self._retry_delay = 1.0
         self._latest: StateSnapshot | None = None
         self._state_sequence = 0
         self._state_done = 0
@@ -176,13 +179,18 @@ class MQTTAdapter:
         self._wall_anchor = time.time() - time.monotonic()
 
     def start(self) -> None:
-        if not self.config.enabled or self._client is not None:
+        if not self.config.enabled or self._worker is not None:
             return
         if self._prepared is None:
             self._prepared = prepare_mqtt(self.config)
         self._password = self._prepared.password
+        self._start_transport()
+        self._worker = threading.Thread(target=self._work, name="mqtt-adapter", daemon=True)
+        self._worker.start()
+
+    def _start_transport(self) -> None:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.config.client_id,
-                             clean_session=True, protocol=mqtt.MQTTv311)
+                             clean_session=True, protocol=mqtt.MQTTv311, reconnect_on_failure=False)
         client.max_queued_messages_set(256)
         client.max_inflight_messages_set(20)
         if self.config.username is not None:
@@ -195,11 +203,13 @@ class MQTTAdapter:
         client.will_set(f"{prefix}/availability", "offline", qos=1, retain=True)
         client.reconnect_delay_set(min_delay=1, max_delay=30)
         client.on_connect = self._on_connect
+        client.on_connect_fail = self._on_connect_fail
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_message
-        self._client = client
-        self._worker = threading.Thread(target=self._work, name="mqtt-adapter", daemon=True)
-        self._worker.start()
+        with self._lock:
+            if self._stop.is_set():
+                return
+            self._client = client
         client.connect_async(parsed.hostname, parsed.port)
         client.loop_start()
 
@@ -211,32 +221,55 @@ class MQTTAdapter:
             self._wake.set()
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
+        with self._lock:
+            if client is not self._client:
+                return
         if reason_code != 0:
             logging.warning("MQTT connection rejected: %s", reason_code)
+            self._retire_transport(client)
             return
         prefix = self.config.topic_prefix
         client.subscribe([(f"{prefix}/set", 1), (f"{prefix}/command/+", 1), ("homeassistant/status", 1)])
         with self._lock:
+            if client is not self._client:
+                return
             self._connected = True
             self._online = False
             self._generation += 1
+            self._retry_delay = 1.0
             self._packet_ids.clear()
         self._wake.set()
 
-    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+    def _retire_transport(self, client) -> None:
         with self._lock:
+            if client is not self._client:
+                return
+            self._client = None
             self._connected = False
             self._online = False
+            self._retired_clients.append(client)
+            self._retry_at = time.monotonic() + self._retry_delay
+            self._retry_delay = min(30.0, self._retry_delay * 2)
         self._wake.set()
 
+    def _on_connect_fail(self, client, userdata):
+        self._retire_transport(client)
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        self._retire_transport(client)
+
     def _on_message(self, client, userdata, message):
+        with self._lock:
+            if client is not self._client:
+                return
+            origin_generation = self._generation
         if message.topic == "homeassistant/status":
             if bytes(message.payload) == b"online":
                 with self._lock:
                     self._birth_sequence += 1
                 self._wake.set()
             return
-        item = (message.topic, bytes(message.payload), bool(message.retain), message.mid, bool(message.dup))
+        item = (origin_generation, message.topic, bytes(message.payload), bool(message.retain), message.mid, bool(message.dup))
         try:
             self._commands.put_nowait(item)
         except queue.Full:
@@ -247,15 +280,18 @@ class MQTTAdapter:
                 logging.error("MQTT command overload result could not be queued")
         self._wake.set()
 
-    def _publish(self, topic: str, payload, *, retain: bool) -> bool:
-        client = self._client
-        with self._lock:
-            connected = self._connected
-        if client is None or not connected:
-            return False
+    def _publish(self, topic: str, payload, *, retain: bool,
+                 expected_generation: int | None = None) -> bool:
         if not isinstance(payload, (str, bytes)):
             payload = json.dumps(payload, separators=(",", ":"), allow_nan=False)
-        info = client.publish(topic, payload, qos=1, retain=retain)
+        with self._lock:
+            client = self._client
+            if (client is None or not self._connected or
+                    (expected_generation is not None and self._generation != expected_generation)):
+                return False
+            # Client identity and generation cannot change between validation and
+            # Paho's nonblocking enqueue. PUBACK waiting remains outside the lock.
+            info = client.publish(topic, payload, qos=1, retain=retain)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             return False
         try:
@@ -286,28 +322,34 @@ class MQTTAdapter:
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._wall_anchor + last))
         return data
 
-    def _announce(self, state: StateSnapshot, *, force_discovery: bool = False) -> bool:
+    def _announce(self, state: StateSnapshot, *, force_discovery: bool = False,
+                  expected_generation: int | None = None) -> bool:
         from .config import AppConfig
         config = AppConfig.model_validate(state.configuration, context={"normalized_duration": True})
         fingerprint = json.dumps(state.configuration, sort_keys=True, separators=(",", ":"))
-        if force_discovery or fingerprint != self._discovery_fingerprint:
-            messages = build_discovery(config) if config.mqtt.discovery.enabled else {}
+        messages = build_discovery(config) if config.mqtt.discovery.enabled else {}
+        if (force_discovery or fingerprint != self._discovery_fingerprint or
+                self._discovery_topics != set(messages)):
             for removed in self._discovery_topics - messages.keys():
-                if not self._publish(removed, b"", retain=True):
+                if not self._publish(removed, b"", retain=True, expected_generation=expected_generation):
+                    self._discovery_fingerprint = None
                     return False
                 self._discovery_topics.discard(removed)
             for topic, payload in messages.items():
                 # Once attempted, conservatively remember a topic even if the
                 # PUBACK becomes uncertain; a later target can then delete it.
                 self._discovery_topics.add(topic)
-                if not self._publish(topic, payload, retain=True):
+                if not self._publish(topic, payload, retain=True, expected_generation=expected_generation):
+                    self._discovery_fingerprint = None
                     return False
             self._discovery_fingerprint = fingerprint
-        if not self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True):
+        if not self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True,
+                             expected_generation=expected_generation):
             return False
         for source_id, sample in state.sources.items():
             if not self._publish(f"{self.config.topic_prefix}/source/{source_id.encode('utf-8').hex()}/availability",
-                                 "online" if sample.error is None else "offline", retain=True):
+                                 "online" if sample.error is None else "offline", retain=True,
+                                 expected_generation=expected_generation):
                 return False
         return True
 
@@ -325,12 +367,12 @@ class MQTTAdapter:
             self._results.append(asdict(result))
 
     def _handle_command(self, item) -> None:
-        topic, payload, retained, mid, duplicate = item
+        origin_generation, topic, payload, retained, mid, duplicate = item
         try:
             request_id, changes = parse_command(topic, payload, retained)
             if "/command/" in topic:
                 with self._lock:
-                    key = (self._generation, mid)
+                    key = (origin_generation, mid)
                     if duplicate and key in self._packet_ids:
                         request_id = self._packet_ids[key]
                     else:
@@ -348,6 +390,17 @@ class MQTTAdapter:
         while not self._stop.is_set():
             self._wake.wait(.1)
             self._wake.clear()
+            while True:
+                with self._lock:
+                    retired = self._retired_clients.popleft() if self._retired_clients else None
+                if retired is None:
+                    break
+                retired.loop_stop()
+            with self._lock:
+                should_reconnect = (self._client is None and not self._stop.is_set() and
+                                    time.monotonic() >= self._retry_at)
+            if should_reconnect:
+                self._start_transport()
             for _ in range(32):
                 with self._lock:
                     if len(self._results) >= 512:
@@ -366,7 +419,7 @@ class MQTTAdapter:
                 dirty = state_sequence != self._state_done
                 due = now - last_periodic >= 5
             if connected and state is not None and (force or dirty or due):
-                if self._announce(state, force_discovery=force):
+                if self._announce(state, force_discovery=force, expected_generation=generation):
                     with self._lock:
                         if self._generation == generation:
                             self._synced_generation = generation
@@ -378,14 +431,17 @@ class MQTTAdapter:
                     with self._lock:
                         may_announce_online = (self._connected and self._generation == generation and
                                                self._synced_generation == generation and not self._online)
-                    if may_announce_online and self._publish(f"{self.config.topic_prefix}/availability", "online", retain=True):
+                    if may_announce_online and self._publish(
+                            f"{self.config.topic_prefix}/availability", "online", retain=True,
+                            expected_generation=generation):
                         with self._lock:
                             if self._connected and self._generation == generation:
                                 self._online = True
             while connected:
                 with self._lock:
                     result = self._results[0] if self._results else None
-                if result is None or not self._publish(f"{self.config.topic_prefix}/result", result, retain=False):
+                if result is None or not self._publish(f"{self.config.topic_prefix}/result", result, retain=False,
+                                                       expected_generation=generation):
                     break
                 with self._lock:
                     if self._results and self._results[0] is result:
@@ -396,12 +452,16 @@ class MQTTAdapter:
             return
         self._stop.set()
         self._wake.set()
-        client = self._client
+        with self._lock:
+            client = self._client
         if client:
-            self._publish(f"{self.config.topic_prefix}/availability", "offline", retain=True)
+            self._publish(f"{self.config.topic_prefix}/availability", "offline", retain=True,
+                          expected_generation=self._generation)
             client.disconnect()
             client.loop_stop()
         if self._worker:
             self._worker.join(timeout=2)
+        while self._retired_clients:
+            self._retired_clients.popleft().loop_stop()
         self._client = None
         self._password = None
