@@ -235,3 +235,50 @@ def test_cli_startup_communication_failure_exits_temporary_without_recovery_writ
     assert 'busy' in output.err
     assert '"close"' in output.out
     assert '"set_duty"' not in output.out and '"restore_bios"' not in output.out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('permanent', [False, True])
+async def test_stop_racing_shielded_rpm_failure_propagates_terminal_status_after_cleanup(tmp_path, permanent):
+    from ha_nuc9_ec.controller import PermanentFailure, TemporaryFailure
+    from ha_nuc9_ec.hardware.base import HardwareError, PreflightError
+    hardware_error = PreflightError if permanent else HardwareError
+    terminal_error = PermanentFailure if permanent else TemporaryFailure
+    config = write_config(tmp_path / 'config.yaml')
+    config.runtime.shutdown_action = 'restore_bios'
+    entered, release = threading.Event(), threading.Event()
+    stopping = asyncio.Event()
+    class FailingRPM(MockBackend):
+        def read_rpm(self):
+            entered.set()
+            assert release.wait(3), 'test must release blocked RPM'
+            raise hardware_error('communication failed during SIGTERM')
+    class ObservedController(Controller):
+        async def stop(self, reason):
+            stopping.set()
+            await super().stop(reason)
+    class ImmediateRPMRuntime(Runtime):
+        async def _rpm(self):
+            await self.controller.read_rpm()
+    backend = FailingRPM()
+    c = ObservedController(config, backend, asyncio.get_running_loop().time)
+    runtime = ImmediateRPMRuntime(c, reader_factory=lambda key, source: Reader(key))
+    task = asyncio.create_task(runtime.run())
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        runtime.request_stop('SIGTERM')
+        await asyncio.wait_for(stopping.wait(), 1)
+        # run is now cleaning up, and the original RPM waiter was cancelled;
+        # the shielded mailbox transaction must still determine terminal status.
+        release.set()
+        with pytest.raises(terminal_error, match='communication failed') as caught:
+            await asyncio.wait_for(task, 1)
+        assert caught.value.exit_code == (78 if permanent else 75)
+        assert c.snapshot().state == 'fault' and c.snapshot().applied_mode == 'unknown'
+        assert backend.operations == [('probe',), ('restore_bios',), ('close',)]
+        assert all(source.done() for source in runtime._sources.tasks)
+    finally:
+        release.set()
+        if not task.done():
+            runtime.request_stop('SIGTERM')
+            await asyncio.gather(task, return_exceptions=True)

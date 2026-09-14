@@ -18,8 +18,8 @@ class _StrictModel(BaseModel):
 
 
 Percent = Annotated[StrictInt, Field(ge=0, le=100)]
-PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
-Finite = Annotated[float, Field(allow_inf_nan=False)]
+PositiveFinite = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+Finite = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 _DURATION = re.compile(r"(?:0|[1-9]\d*)(?:\.\d+)?(ms|s)\Z")
 
 

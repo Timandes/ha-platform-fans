@@ -314,3 +314,39 @@ async def test_request_cache_retains_256_results_and_evicts_oldest(controller, b
     assert (await controller.change(change, 'request-256')).revision == 257
     assert backend.operations == [('probe',), ('restore_bios',)]
     await controller.stop('normal')
+
+
+@pytest.mark.asyncio
+async def test_same_id_boolean_payload_conflicts_with_cached_numeric_success(controller, backend):
+    await controller.start()
+    path = 'fans.cpufan.override.inputs.0.custom.minimum_duty_percent'
+    first = await controller.change({path: 1}, 'typed-id')
+    assert first.ok and first.revision == 1
+    conflicting = await controller.change({path: True}, 'typed-id')
+    assert not conflicting.ok and 'different payload' in conflicting.error
+    assert conflicting.revision == 1
+    assert (await controller.change({path: 1}, 'typed-id')) == first
+    assert controller.config.fans.cpufan.override.inputs[0].custom.minimum_duty_percent == 1
+    assert backend.operations == [('probe',), ('restore_bios',)]
+    await controller.stop('normal')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('path', [
+    'fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c',
+    'fans.cpufan.override.inputs.0.custom.minimum_temperature_c',
+    'fans.cpufan.override.inputs.0.boost_above_c',
+])
+async def test_fresh_boolean_float_command_rejects_atomically(controller, backend, path):
+    await controller.start()
+    initial = controller.config
+    changes = {'fans.cpufan.override.fixed.duty_percent': 55,
+               'fans.cpufan.override.inputs.0.custom.minimum_temperature_c': -10,
+               path: True}
+    result = await controller.change(changes, 'fresh-boolean')
+    assert not result.ok and result.revision == 0
+    assert controller.config == initial
+    assert controller.snapshot().applied_mode == 'bios'
+    assert controller.snapshot().fault is None
+    assert backend.operations == [('probe',), ('restore_bios',)]
+    await controller.stop('normal')

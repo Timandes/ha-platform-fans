@@ -29,6 +29,19 @@ class PermanentFailure(RuntimeError):
     exit_code = 78
 
 
+def _same_payload(left: Any, right: Any) -> bool:
+    """Compare request structure without Python's bool/int/float equivalence."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        keys = {(type(key), key) for key in left}
+        return keys == {(type(key), key) for key in right} and all(
+            _same_payload(value, right[key]) for key, value in left.items())
+    if isinstance(left, (tuple, list)):
+        return len(left) == len(right) and all(_same_payload(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 class Controller:
     def __init__(self, config: AppConfig, backend: Backend, clock: Callable[[], float]):
         self._config = config.model_copy(deep=True)
@@ -42,6 +55,7 @@ class Controller:
         self._duty: DutyPair | None = None
         self._rpm: tuple[int, int, int] | None = None
         self._fault: str | None = None
+        self._failure_type: type[TemporaryFailure | PermanentFailure] = TemporaryFailure
         self._last_cycle: float | None = None
         self._identified = False
         self._closed = False
@@ -87,9 +101,13 @@ class Controller:
     def on_sample(self, sample: Sample) -> None:
         self._samples[sample.source_id] = sample
 
-    def _ensure_active(self) -> None:
+    def raise_if_faulted(self) -> None:
+        """Propagate the terminal failure category after pending work drains."""
         if self._fault is not None:
-            raise TemporaryFailure(self._fault)
+            raise self._failure_type(self._fault)
+
+    def _ensure_active(self) -> None:
+        self.raise_if_faulted()
         if self._closed or self._state == 'stopping':
             raise TemporaryFailure('controller is stopping')
 
@@ -97,14 +115,16 @@ class Controller:
         try:
             return await asyncio.get_running_loop().run_in_executor(self._executor, method, *args)
         except PreflightError as error:
-            self._mark_fault(str(error), unknown=True)
+            self._mark_fault(str(error), unknown=True, failure_type=PermanentFailure)
             raise PermanentFailure(str(error)) from error
         except HardwareError as error:
             self._mark_fault(str(error), unknown=True)
             raise TemporaryFailure(str(error)) from error
 
-    def _mark_fault(self, message: str, *, unknown: bool = False) -> None:
+    def _mark_fault(self, message: str, *, unknown: bool = False,
+                    failure_type: type[TemporaryFailure | PermanentFailure] = TemporaryFailure) -> None:
         self._fault = message
+        self._failure_type = failure_type
         self._state = 'fault'
         if unknown:
             self._applied = 'unknown'
@@ -205,7 +225,7 @@ class Controller:
         async def operation():
             previous = self._results.get(request_id)
             if previous is not None:
-                if previous[0] == payload:
+                if _same_payload(previous[0], payload):
                     return previous[1]
                 return CommandResult(request_id, False, self._revision, 'request_id reused with different payload')
             try:

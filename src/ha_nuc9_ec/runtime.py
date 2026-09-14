@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .config import AppConfig, ConfigError, SourceConfig, load_config
-from .controller import Controller, TemporaryFailure
+from .controller import Controller
 from .model import CommandResult, Sample
 from .sources.base import Collector, SourceReadError, SourceReader
 from .sources.smart import SmartctlReader
@@ -199,8 +199,7 @@ class Runtime:
             result = await self.reload_file(config_path, f'sighup-{sequence}')
             if on_reload:
                 on_reload(result)
-            if self.controller.snapshot().fault:
-                raise TemporaryFailure(self.controller.snapshot().fault)
+            self.controller.raise_if_faulted()
 
     async def run(self, *, config_path: Path | None = None, on_ready=None, on_reload=None):
         tasks = []
@@ -223,6 +222,9 @@ class Runtime:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await self.stop(self.stop_reason)
+        # SIGTERM may win FIRST_COMPLETED while a shielded EC transaction is
+        # still running. stop drains it; its eventual failure must remain fatal.
+        self.controller.raise_if_faulted()
 
     async def stop(self, reason: str):
         async with self._reload_lock:

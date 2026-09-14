@@ -142,3 +142,43 @@ def test_cli_yaml_syntax_error_does_not_echo_source_line(tmp_path, example_path,
     error = capsys.readouterr().err
     assert "YAML" in error
     assert secret not in error
+
+
+@pytest.mark.parametrize('field', [
+    'duty_increment_percent_per_c', 'minimum_temperature_c', 'boost_above_c', 'temperature_c',
+])
+@pytest.mark.parametrize('value', [True, False])
+def test_float_fields_reject_yaml_booleans(tmp_path, example_path, field, value):
+    import yaml
+    data = yaml.safe_load(example_path.read_text())
+    override = data['fans']['cpufan']['override']
+    # Keep true/false-as-1/0 above the curve minimum so threshold ordering
+    # cannot accidentally hide a primitive numeric-type validation defect.
+    override['inputs'][0]['custom']['minimum_temperature_c'] = -10
+    if field == 'boost_above_c':
+        target = override['inputs'][0]
+    elif field == 'temperature_c':
+        target = override['fan_off']
+    else:
+        target = override['inputs'][0]['custom']
+    target[field] = value
+    path = tmp_path / 'boolean-float.yaml'
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ConfigError, match=field):
+        load_config(path)
+
+
+def test_strict_float_fields_preserve_yaml_integer_numbers(example_config):
+    override = example_config.fans.cpufan.override
+    assert override.inputs[0].custom.minimum_temperature_c == 47.0
+    assert override.inputs[0].custom.duty_increment_percent_per_c == 2.0
+    assert override.inputs[0].boost_above_c == 75.0
+    assert override.fan_off.temperature_c == 0.0
+    changed = apply_changes(example_config, {
+        'fans.cpufan.override.inputs.0.custom.minimum_temperature_c': 46,
+        'fans.cpufan.override.inputs.0.custom.duty_increment_percent_per_c': 3,
+        'fans.cpufan.override.inputs.0.boost_above_c': 76,
+    })
+    assert changed.fans.cpufan.override.inputs[0].custom.minimum_temperature_c == 46.0
+    assert changed.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 3.0
+    assert changed.fans.cpufan.override.inputs[0].boost_above_c == 76.0
