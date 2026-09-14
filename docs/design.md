@@ -1,6 +1,6 @@
 # ha-nuc9-ec 设计规格
 
-日期：2026-09-14。状态：设计与实现计划阶段，未部署。本文是当前实现基线；实机发布条件另列。
+日期：2026-09-14（设计基线）；2026-09-15 更新交付状态。实现与无硬件验证已完成，当前为 candidate，未部署至 NAS。本文是实现基线；实际软件证据与未完成实机门槛见 [验收说明](acceptance.md)，最终归档记录见 `dist/manifest.json`。
 
 ## 目标与设计前提
 
@@ -54,7 +54,7 @@ Custom 基础计算定义为：`最低占空比 + max(0, 温度 - 最低温度) 
 
 每个热源具有 `enabled`、`selector`、`poll_interval`、`stale_after`。Provider 返回摄氏度、读取时间、有效性、错误原因及已知刷新/缓存限制。相同数值可以是有效新读取，不能据此判定过期；读取成功也不能隐瞒驱动缓存带来的数据年龄。
 
-以 thermal zone type、hwmon name+label、PCI 地址或磁盘 by-id 等稳定身份选择设备，不能依赖 hwmonN/thermal_zoneN/nvmeN 的编号。零匹配和多匹配都报错。重复传感器只采集一次，供多组策略复用。采集器按各自周期运行，SMART 等慢查询有超时且不阻塞 CPU 控制；机械盘采集应支持待机时跳过读取，具体实现按设备协议验证。
+以 thermal zone type、hwmon name+label、PCI 地址或磁盘 by-id 等稳定身份选择设备，不能依赖 hwmonN/thermal_zoneN/nvmeN 的编号。零匹配和多匹配都报错。重复传感器只采集一次，供多组策略复用。采集器按各自周期运行，SMART 等慢查询有超时且不阻塞 CPU 控制；机械盘采集支持待机时跳过读取，具体可用性须按设备协议验证。待机跳过保留上一样本时间，不刷新有效期；超过 stale_after 后，必需自动输入仍按传感器故障处理。
 
 NUC9 实机已经确认：CPU x86_pkg_temp/coretemp、i915 温度、pch_cannonlake 温度和三个 NVMe hwmon 温度设备。尚未把 acpitz 的 27.8°C 证明为机箱环境温度，也未验证独立显卡 provider。这里定义 provider 接口不等于承诺所有 GPU 厂商和磁盘协议都已支持。
 
@@ -334,3 +334,7 @@ HA实体使用 `<prefix>/command/<entity_id>` 接收标量并映射为同一候�
 - [Linux 6.18 x86_pkg_temp_thermal 源码](https://github.com/torvalds/linux/blob/v6.18/drivers/thermal/intel/x86_pkg_temp_thermal.c)
 - [s6-overlay 官方说明](https://github.com/just-containers/s6-overlay)
 - [s6-supervise 官方说明](https://skarnet.org/software/s6/s6-supervise.html)
+
+## 当前容器实现细节
+
+s6-overlay 固定 3.2.3.2，服务定义位于 `/etc/s6-overlay/s6-rc.d`，bundle 成员位于 `/etc/s6-overlay/user-bundles.d/user/contents.d`。只读 rootfs 的 `/run` tmpfs 必须 exec，`/tmp` 保持 noexec。健康身份读取 `/proc/PID/task/PID/stat`，避免 QEMU 用户态合成自身 proc stat 导致与外部视图不一致；仍严格核对 PID/starttime/instance_id 与 pidfd，不引入容忍差值。当前 Linux 验证在本机专用 arm64 Lima VM 上仿真 amd64，不是 NAS 实机时延或权限验收。操作命令、热源范围、凭据和永久故障恢复见 [操作手册](operations.md)。
