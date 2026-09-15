@@ -83,6 +83,12 @@ fans:
           minimum_duty_percent: 30
           duty_increment_percent_per_c: 15
         boost_above_c: 53
+      - source: cpu_package
+        custom:
+          minimum_temperature_c: 40
+          minimum_duty_percent: 0
+          duty_increment_percent_per_c: 2
+        boost_above_c: 90
       fan_off:
         enabled: false
         temperature_c: 0
