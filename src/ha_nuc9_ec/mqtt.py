@@ -177,6 +177,9 @@ class MQTTAdapter:
         self._discovery_topics: set[str] = set()
         self._discovery_fingerprint: str | None = None
         self._wall_anchor = time.time() - time.monotonic()
+        self._monotonic = time.monotonic
+        self._source_availability: dict[str, str | None] = {}
+        self._last_urgent_key: tuple | None = None
 
     def start(self) -> None:
         if not self.config.enabled or self._worker is not None:
@@ -349,12 +352,36 @@ class MQTTAdapter:
         if not self._publish(f"{self.config.topic_prefix}/state", self._state_payload(state), retain=True,
                              expected_generation=expected_generation):
             return False
-        for source_id, sample in state.sources.items():
+        availability = self._availability(state)
+        for source_id in self._source_availability.keys() - availability.keys():
+            self._source_availability[source_id] = None
             if not self._publish(f"{self.config.topic_prefix}/source/{source_id.encode('utf-8').hex()}/availability",
-                                 "online" if sample.error is None else "offline", retain=True,
-                                 expected_generation=expected_generation):
+                                 b"", retain=True, expected_generation=expected_generation):
                 return False
+            del self._source_availability[source_id]
+        for source_id, status in availability.items():
+            if force_discovery or self._source_availability.get(source_id) != status:
+                # A failed PUBACK may still have changed the retained value.
+                # Remember attempted topics and invalidate their previous status.
+                self._source_availability[source_id] = None
+                if not self._publish(f"{self.config.topic_prefix}/source/{source_id.encode('utf-8').hex()}/availability",
+                                     status, retain=True, expected_generation=expected_generation):
+                    return False
+                # Only acknowledge a cached status after successful publication.
+                self._source_availability[source_id] = status
         return True
+
+    @staticmethod
+    def _availability(state: StateSnapshot) -> dict[str, str]:
+        return {source_id: "online" if sample.error is None else "offline"
+                for source_id, sample in state.sources.items()}
+
+    def _urgent_key(self, state: StateSnapshot) -> tuple:
+        # Temperatures, RPM, duty and sample timestamps are periodic telemetry.
+        # Revisions identify committed policy/command changes; faults and source
+        # health must bypass the telemetry interval, including their recovery.
+        return (state.state, state.requested_mode, state.applied_mode, state.revision,
+                state.fault, tuple(sorted(self._availability(state).items())))
 
     def _complete(self, request_id: str, changes: dict[str, object]) -> None:
         try:
@@ -389,7 +416,8 @@ class MQTTAdapter:
                                       "revision": self._latest.revision if self._latest else 0})
 
     def _work(self) -> None:
-        last_periodic = time.monotonic()
+        last_periodic = self._monotonic()
+        retry_announce = False
         while not self._stop.is_set():
             self._wake.wait(.1)
             self._wake.clear()
@@ -412,7 +440,7 @@ class MQTTAdapter:
                     self._handle_command(self._commands.get_nowait())
                 except queue.Empty:
                     break
-            now = time.monotonic()
+            now = self._monotonic()
             with self._lock:
                 connected, state = self._connected, self._latest
                 generation = self._generation
@@ -420,9 +448,15 @@ class MQTTAdapter:
                 birth_sequence = self._birth_sequence
                 force = generation != self._synced_generation or birth_sequence != self._birth_done
                 dirty = state_sequence != self._state_done
-                due = now - last_periodic >= 5
-            if connected and state is not None and (force or dirty or due):
+                due = now - last_periodic >= self.config.publish_interval
+                urgent_key = self._urgent_key(state) if state is not None else None
+                urgent = dirty and urgent_key != self._last_urgent_key
+            if connected and state is not None and (force or urgent or due or retry_announce):
+                # Retry uncertain publications even if recovery returns to the
+                # last confirmed urgent key before the normal interval elapses.
+                retry_announce = True
                 if self._announce(state, force_discovery=force, expected_generation=generation):
+                    retry_announce = False
                     with self._lock:
                         if self._generation == generation:
                             self._synced_generation = generation
@@ -430,7 +464,8 @@ class MQTTAdapter:
                             self._birth_done = birth_sequence
                         if self._state_sequence == state_sequence:
                             self._state_done = state_sequence
-                    last_periodic = now
+                    self._last_urgent_key = urgent_key
+                    last_periodic = self._monotonic()
                     with self._lock:
                         may_announce_online = (self._connected and self._generation == generation and
                                                self._synced_generation == generation and not self._online)

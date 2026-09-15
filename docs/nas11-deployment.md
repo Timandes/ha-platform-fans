@@ -6,6 +6,7 @@
 - SYS：PCI地址0000:02:00.0、0000:03:00.0、0000:04:00.0的NVMe Composite温度，1秒采样；三块盘分别算需求，取最大值。48°C及以下30%，超过48°C每°C增加15%，50°C为60%、52°C为90%，约52.7°C达到100%上限，53°C及以上强制100%。PCI地址用于避免hwmon/NVMe编号漂移；更换盘位后重新discover。
 - 立即升速，降速等待10秒。必需热源缺失或过期时请求两组上限100%并退出，s6负责重启；CPU运行下限仍40%，SYS下限30%。
 - MQTT：`tcp://pi-1.timandes.net:1883`，使用已验证允许的匿名连接，topic `nuc9/nas11`，Discovery前缀`homeassistant`。未配置TLS。文件配置是重启后的基线，MQTT调整不写回文件。
+- MQTT常规遥测默认每5秒一次，配置项`mqtt.publish_interval`；故障/模式/配置/热源在线状态变化即时发布。CPU100ms采样保持不变。详细行为和Recorder排除示例见[运维说明](operations.md#mqtt-上报频率与-ha-历史)。
 - Docker `restart: unless-stopped`，容器内s6监督。正常停止保留最后PWM（hold）；需要退出覆盖时通过配置/HA切换bios并确认。监督层不写BIOS。
 
 本次后端将原40–80%限制扩展为30–100%，仍拒绝停转、越界值及身份不匹配。旧实机报告仅证明旧范围，不能将其当作新增端点的实测证据。

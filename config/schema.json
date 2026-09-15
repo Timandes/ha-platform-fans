@@ -243,6 +243,11 @@
     "MQTTConfig": {
       "additionalProperties": false,
       "properties": {
+        "publish_interval": {
+          "default": "5s",
+          "title": "Publish Interval",
+          "type": "string"
+        },
         "enabled": {
           "title": "Enabled",
           "type": "boolean"

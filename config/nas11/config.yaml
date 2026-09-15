@@ -86,6 +86,7 @@ fans:
         enabled: false
         temperature_c: 0
 mqtt:
+  publish_interval: 5s
   enabled: true
   broker: tcp://pi-1.timandes.net:1883
   client_id: nas11_nuc9

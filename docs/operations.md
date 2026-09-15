@@ -68,3 +68,27 @@ health 仅读 `/run/ha-nuc9-ec/health.json`，启动宽限 10s，运行控制进
 设备权限失败应依次检查：目标 DMI/BIOS 是否完全匹配；`/dev/port`、`/dev/mem` 是否存在且映射模式正确；`SYS_RAWIO`/`SYS_ADMIN`、设备 cgroup、AppArmor/seccomp、内核 lockdown/STRICT_DEVMEM 限制；`/sys` 是否为宿主只读挂载；共享锁是否被另一个控制器持有。不要删除被持有的锁或让多个控制程序竞争，也不要添加 privileged 作为通用修复。NAS-11 实测仅加 SYS_RAWIO 时 PCI config 可读长度为 64，LGMR（偏移 0x98）返回空值并报 unexpected LGMR；加入 SYS_ADMIN 后读取 4 字节 01 00 41 FE，EC 身份与 RPM 查询通过。SYS_ADMIN 权限较广，但当前 sysfs PCI 读取接口要求它；monitor 仍移除所有 capabilities。不得跳过 LGMR 校验来规避权限问题。依据：[Linux v6.18 pci_read_config](https://github.com/torvalds/linux/blob/v6.18/drivers/pci/pci-sysfs.c#L694)。其他实机验收项目分别记录。
 
 s6 3.2.3.2 服务位于 `/etc/s6-overlay/s6-rc.d`，bundle 成员位于 `/etc/s6-overlay/user-bundles.d/user/contents.d`。`/run` 必须 exec；错误地设 noexec 会使 s6 init 报 Permission denied。详细锁定依赖与容器测试说明见 [container/README.md](../container/README.md)。
+
+## MQTT 上报频率与 HA 历史
+
+`mqtt.publish_interval: 5s` 是常规状态上报周期；旧配置省略该字段也默认5秒，支持显式`ms`/`s`单位且必须为正数。MQTT启动配置变更需要重启进程，不可通过MQTT修改。CPU/NVMe采集与本地风扇计算频率不受它影响。
+
+周期内只保留最新的温度、转速、目标PWM和采样时间快照。控制模式、已提交配置版本、故障及热源在线状态变化绕过周期等待；命令结果及时发布。首次连接、重连、HA birth会同步Discovery/完整状态/热源在线状态；稳定运行时每个热源的availability仅变化时发送。断线时保留最新快照，重连后先同步再宣告online。当前完整state和HA实体字段保留兼容，未拆分topic。
+
+默认5秒是正常遥测间隔，不是故障/命令流量的硬上限；网络阻塞、重连和未确认消息重试也可能改变收到的时间间隔。32个实体仍共享state，只有实体值变化才通常形成HA状态历史；每5秒发布仍可能更新四个“最后成功采样时间”。
+
+需要进一步减少HA数据库增长时，可将这四个诊断时间实体排除出Recorder；排除历史不会停止实时显示。以下示例按默认实体命名，应用前核对HA中的实际ID，并合并到已有`recorder`配置，不要重复定义顶层键。本项目不自动修改HA配置。
+
+```yaml
+recorder:
+  commit_interval: 30
+  purge_keep_days: 10
+  exclude:
+    entities:
+      - sensor.nuc9_fan_controller_cpu_package_last_successful_sample
+      - sensor.nuc9_fan_controller_nvme_02_last_successful_sample
+      - sensor.nuc9_fan_controller_nvme_03_last_successful_sample
+      - sensor.nuc9_fan_controller_nvme_04_last_successful_sample
+```
+
+`commit_interval`只改变事务提交频率，不会减少记录条数；容量需结合排除项和保留天数控制。运行前评估记录于LLMKB `records/nas11-mqtt-io-assessment.md`。

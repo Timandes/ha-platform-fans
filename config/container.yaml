@@ -70,6 +70,7 @@ fans:
         enabled: false
         temperature_c: 0
 mqtt:
+  publish_interval: 5s
   enabled: false
   broker: tcp://mqtt.example.lan:1883
   client_id: nas11_nuc9

@@ -489,3 +489,44 @@ def test_real_broker_extreme_finite_curve_command_saturates_atomically(broker):
         assert controlled.controller.config.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 1e308
     finally:
         unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()
+
+
+def test_high_rate_cycles_publish_periodic_latest_state_and_commands_remain_immediate(broker):
+    config = mqtt_config(load_config(Path(__file__).parents[2] / 'config/example.yaml'), broker)
+    controlled = ControllerLoop(config)
+    adapter = MQTTAdapter(config.mqtt, controlled.submit)
+    unsubscribe = controlled.controller.subscribe(adapter.publish_state)
+    adapter.publish_state(controlled.controller.snapshot())
+    received = []
+    subscribed = threading.Event()
+    observer = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='rate-observer', clean_session=True)
+    observer.on_connect = lambda c, u, f, r, p: c.subscribe('nuc9/nas11/#', 1)
+    observer.on_subscribe = lambda *args: subscribed.set()
+    observer.on_message = lambda c, u, m: received.append((time.monotonic(), m.topic, bytes(m.payload)))
+    observer.connect('127.0.0.1', broker); observer.loop_start()
+    try:
+        assert subscribed.wait(2)
+        adapter.start()
+        assert wait_until(lambda: any(t.endswith('/availability') and p == b'online' for _, t, p in received))
+        deadline = time.monotonic() + 6.2
+        cycle_count = 0
+        while time.monotonic() < deadline:
+            controlled.call(controlled.controller.tick()).result(2)
+            cycle_count += 1
+            time.sleep(.1)
+        states = [(at, json.loads(p)) for at, t, p in received if t == 'nuc9/nas11/state']
+        assert cycle_count >= 50
+        assert len(states) == 2
+        assert states[1][0] - states[0][0] >= 4.8
+        assert states[1][1]['sources']['cpu_package']['read_at'] > states[0][1]['sources']['cpu_package']['read_at'] + 4
+        for source in ('cpu_package', 'pch'):
+            topic = 'nuc9/nas11/source/' + source.encode().hex() + '/availability'
+            assert sum(t == topic for _, t, _ in received) == 1
+        # A user change must arrive before the remaining telemetry interval.
+        marker = len(received)
+        observer.publish('nuc9/nas11/set', json.dumps({'request_id':'rate-command', 'changes':{'fans.cpufan.override.fixed.duty_percent':60}}), qos=1)
+        assert wait_until(lambda: any(t.endswith('/result') and json.loads(p).get('request_id') == 'rate-command'
+                                     for _, t, p in received[marker:]), 2)
+        assert any(t == 'nuc9/nas11/state' and json.loads(p)['revision'] == 1 for _, t, p in received[marker:])
+    finally:
+        unsubscribe(); adapter.stop(); observer.loop_stop(); observer.disconnect(); controlled.close()
