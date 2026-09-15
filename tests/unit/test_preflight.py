@@ -65,7 +65,7 @@ def test_preflight_returns_identity_and_keeps_lock(monkeypatch, platform_root):
     backend = LinuxBackend.open(sys_root, sys_root.parent / "ha-nuc9-ec.lock", dev_root=dev_root)
     assert backend.probe().ec_version == "244400"
     assert backend.probe().signature == "SPG_EC"
-    assert backend.duty_bounds == (40, 80)
+    assert backend.duty_bounds == (30, 100)
     backend.close()
 
 
@@ -124,8 +124,8 @@ def test_linux_backend_still_enforces_real_bounds(monkeypatch, platform_root):
     sys_root, dev_root, _ = platform_root
     monkeypatch.setattr("ha_nuc9_ec.hardware.linux.LinuxPortIO", PreflightPort)
     with LinuxBackend.open(sys_root, sys_root.parent / "lock", dev_root=dev_root) as backend:
-        with pytest.raises(HardwareError, match="40..80"):
-            backend.set_duty(DutyPair(39, 80))
+        with pytest.raises(HardwareError, match="30..100"):
+            backend.set_duty(DutyPair(29, 80))
 
 
 def test_sys_root_is_the_mounted_sys_tree_not_a_filesystem_root(monkeypatch, platform_root):
@@ -170,5 +170,30 @@ def test_startup_mailbox_busy_is_temporary_and_releases_lock(monkeypatch, platfo
     fd = os.open(lock_path, os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("duty", [30, 100])
+def test_port_io_writes_supported_pwm_endpoints(tmp_path, duty):
+    path = tmp_path / "port"
+    path.write_bytes(bytes(0x592))
+    fd = os.open(path, os.O_RDWR)
+    try:
+        LinuxPortIO(fd).write_byte(0x591, duty)
+        assert os.pread(fd, 1, 0x591) == bytes([duty])
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("duty", [29, 101])
+def test_port_io_rejects_pwm_outside_supported_range(tmp_path, duty):
+    path = tmp_path / "port"
+    path.write_bytes(bytes(0x592))
+    fd = os.open(path, os.O_RDWR)
+    try:
+        with pytest.raises(HardwareError, match="not allowed"):
+            LinuxPortIO(fd).write_byte(0x591, duty)
+        assert os.pread(fd, 1, 0x591) == b"\x00"
     finally:
         os.close(fd)

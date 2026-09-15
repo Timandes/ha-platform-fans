@@ -74,14 +74,15 @@ def test_readback_mismatch_never_commits(fake_port):
     assert (0x10, 0x0D) not in fake_port.logical_writes
 
 
-@pytest.mark.parametrize("pair", [DutyPair(40, 40), DutyPair(80, 80)])
-def test_real_mailbox_accepts_inclusive_verified_bounds(fake_port, pair):
+@pytest.mark.parametrize("pair", [DutyPair(30, 100), DutyPair(100, 30), DutyPair(40, 80)])
+def test_real_mailbox_accepts_inclusive_supported_bounds(fake_port, pair):
     Mailbox(fake_port, sleep=lambda _: None).set_duty(pair)
+    assert fake_port.logical_writes == [(0x11, pair.cpu), (0x12, pair.sys), (0x10, 0x0D)]
 
 
-@pytest.mark.parametrize("pair", [DutyPair(39, 40), DutyPair(40, 81), DutyPair(True, 40)])
-def test_real_mailbox_rejects_unverified_or_non_integer_duty(fake_port, pair):
-    with pytest.raises(HardwareError, match="40..80"):
+@pytest.mark.parametrize("pair", [DutyPair(29, 40), DutyPair(40, 101), DutyPair(True, 40), DutyPair(30.5, 40)])
+def test_real_mailbox_rejects_out_of_range_or_non_integer_duty(fake_port, pair):
+    with pytest.raises(HardwareError, match="30..100"):
         Mailbox(fake_port, sleep=lambda _: None).set_duty(pair)
     assert fake_port.logical_writes == []
 

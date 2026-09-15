@@ -31,7 +31,7 @@ class LinuxPortIO:
 
     def write_byte(self, address: int, value: int) -> None:
         index_value = address == 0x590 and 0x10 <= value <= 0x16
-        data_value = address == 0x591 and (value in (0, 1, 0x0D, 0x0E, 0x0F) or 40 <= value <= 80)
+        data_value = address == 0x591 and (value in (0, 1, 0x0D, 0x0E, 0x0F) or 30 <= value <= 100)
         if not (index_value or data_value):
             raise HardwareError("port write not allowed")
         try:
@@ -116,7 +116,7 @@ class LinuxBackend(Backend):
 
     @property
     def duty_bounds(self) -> tuple[int, int]:
-        return (40, 80)
+        return (30, 100)
 
     def probe(self) -> DeviceInfo:
         return self._info

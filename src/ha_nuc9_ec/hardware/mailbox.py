@@ -99,8 +99,8 @@ class Mailbox:
 
     def set_duty(self, pair: DutyPair) -> None:
         values = (pair.cpu, pair.sys)
-        if any(not isinstance(value, int) or isinstance(value, bool) or not 40 <= value <= 80 for value in values):
-            raise HardwareError("real hardware duty must be an integer in 40..80")
+        if any(not isinstance(value, int) or isinstance(value, bool) or not 30 <= value <= 100 for value in values):
+            raise HardwareError("real hardware duty must be an integer in 30..100")
         self._command(0x0D, values)
 
     def restore_bios(self) -> None:

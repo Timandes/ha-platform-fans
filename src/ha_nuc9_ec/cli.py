@@ -60,7 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("config", type=Path)
     evaluate.add_argument("samples", type=Path, help="JSON object keyed by source ID")
     evaluate.add_argument("--now", type=float, default=None)
-    evaluate.add_argument("--bounds", nargs=2, type=int, metavar=("MIN", "MAX"), default=(40, 80))
+    evaluate.add_argument("--bounds", nargs=2, type=int, metavar=("MIN", "MAX"), default=(30, 100))
     discover = commands.add_parser("discover", help="list stable local sysfs temperature selectors")
     discover.add_argument("--sys-root", type=Path, default=Path("/sys"))
     run = commands.add_parser("run", help="run the fan controller", description="SIGHUP reloads file policy/sources; device/MQTT changes require process restart.")

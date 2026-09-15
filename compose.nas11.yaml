@@ -1,0 +1,23 @@
+name: ha-platform-fans-nas11
+services:
+  controller:
+    image: ha-platform-fans:nas11-nvme
+    platform: linux/amd64
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      NUC9_BACKEND: linux
+    cap_add:
+    - SYS_RAWIO
+    - SYS_ADMIN
+    devices:
+    - /dev/port:/dev/port:rw
+    - /dev/mem:/dev/mem:r
+    tmpfs:
+    - /run:rw,nosuid,nodev,exec,size=16m
+    - /tmp:rw,nosuid,nodev,noexec,size=16m
+    volumes:
+    - ./config/nas11:/config:ro
+    - /sys:/sys:ro
+    - /run/lock:/run/lock:rw
