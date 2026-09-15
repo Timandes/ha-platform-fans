@@ -2,7 +2,7 @@
 
 配置为 `config/nas11/config.yaml`，Compose 为 `compose.nas11.yaml`，检出目录 `/home/timandes/ha-platform-fans`。
 
-- CPU：x86_pkg_temp，100ms 采样，balanced 参数为70°C起点、27%基础PWM、每°C增加2%；运行下限40%。这些参数来自NUC9 BIOS预设UI，不等同于固件内部自动算法，停转关闭。
+- CPU：x86_pkg_temp，100ms 采样，保留实际运行的 cool 策略（68°C起点、27%基础PWM、每°C增加2%），运行下限40%；CPU≥90°C直接请求100%，该阈值在自动曲线模式下生效。这些参数来自NUC9 BIOS预设UI，不等同于固件内部自动算法，停转关闭。
 - SYS：PCI地址0000:02:00.0、0000:03:00.0、0000:04:00.0的NVMe Composite温度，1秒采样；三块盘分别算需求，取最大值。48°C及以下30%，超过48°C每°C增加15%，50°C为60%、52°C为90%，约52.7°C达到100%上限，53°C及以上强制100%。PCI地址用于避免hwmon/NVMe编号漂移；更换盘位后重新discover。
 - 立即升速，降速等待10秒。必需热源缺失或过期时请求两组上限100%并退出，s6负责重启；CPU运行下限仍40%，SYS下限30%。
 - MQTT：`tcp://pi-1.timandes.net:1883`，使用已验证允许的匿名连接，topic `nuc9/nas11`，Discovery前缀`homeassistant`。未配置TLS。文件配置是重启后的基线，MQTT调整不写回文件。
@@ -37,3 +37,7 @@ docker compose -f compose.nas11.yaml exec controller ha-nuc9-ec health
 北京时间12:03:07启动 `ha-platform-fans-nas11-controller-1`；12:05:02仍healthy、同一controller实例、Docker重启0次，服务保持运行。MQTT独立订阅核对32/32条Discovery配置匹配、availability=online、fault=null；快照CPU37°C→40%，NVMe最高46.85°C→SYS78%，RPM1962/3540/3648。只验证了broker上的Discovery和状态，未检查Home Assistant界面或用户侧控制操作。
 
 新镜像归档位于NAS `dist/nvme-deploy-20260915/ha-platform-fans-nas11-nvme.tar`（169027584字节，SHA256 `9fd3f6778fafc9917fd2c5ba240e7e98e228b030e60db45f66b3f29575fc9f73`）。原始试验、MQTT快照、构建及启动日志也位于该目录。长时压力、重启/恢复及完整生产发布门槛仍未完成。
+
+## CPU 高温全速阈值修复
+
+旧预设没有设置CPU boost，Cool在100°C仍仅计算91%；驱动报告的临界温度为100°C。现在配置增加 `fans.cpufan.override.inputs[0].boost_above_c: 90`，使用现有策略引擎立即请求100%，降速仍等待10秒。保留运行时已选择的cool，并写入文件以便重启后保持一致。SYS曲线不变，不需要重建镜像。

@@ -47,12 +47,13 @@ fans:
   cpufan:
     minimum_running_duty_percent: 40
     override:
-      mode: balanced
+      mode: cool
       fixed:
         duty_percent: 40
       combine: max
       inputs:
       - source: cpu_package
+        boost_above_c: 90
       fan_off:
         enabled: false
         temperature_c: 0
