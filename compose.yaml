@@ -11,6 +11,8 @@ services:
       NUC9_BACKEND: linux
     cap_add:
       - SYS_RAWIO
+      # Linux requires this to read PCI config beyond the first 64 bytes (LGMR).
+      - SYS_ADMIN
     devices:
       - /dev/port:/dev/port:rw
       - /dev/mem:/dev/mem:r

@@ -65,6 +65,6 @@ health 仅读 `/run/ha-nuc9-ec/health.json`，启动宽限 10s，运行控制进
 
 退出 78 是配置/身份/权限等永久错误；s6 finish 返回 125，服务保持 down/unhealthy，不无限循环。修复原因、验证配置后执行 `docker compose restart controller`；修改挂载需 recreate。退出 75 是临时控制故障，finish 延迟 5s；timeout-finish=7000ms，timeout-kill=3000ms，Compose 停止宽限 15s。正常 `docker compose stop` 不会被监督器重新拉起。
 
-设备权限失败应依次检查：目标 DMI/BIOS 是否完全匹配；`/dev/port`、`/dev/mem` 是否存在且映射模式正确；`SYS_RAWIO`、设备 cgroup、AppArmor/seccomp、内核 lockdown/STRICT_DEVMEM 限制；`/sys` 是否为宿主只读挂载；共享锁是否被另一个控制器持有。不要删除被持有的锁或让多个控制程序竞争，也不要添加 privileged 作为通用修复。当前候选在本机 VM 仅验证模拟容器权限，NAS 实际设备访问仍 pending。
+设备权限失败应依次检查：目标 DMI/BIOS 是否完全匹配；`/dev/port`、`/dev/mem` 是否存在且映射模式正确；`SYS_RAWIO`/`SYS_ADMIN`、设备 cgroup、AppArmor/seccomp、内核 lockdown/STRICT_DEVMEM 限制；`/sys` 是否为宿主只读挂载；共享锁是否被另一个控制器持有。不要删除被持有的锁或让多个控制程序竞争，也不要添加 privileged 作为通用修复。NAS-11 实测仅加 SYS_RAWIO 时 PCI config 可读长度为 64，LGMR（偏移 0x98）返回空值并报 unexpected LGMR；加入 SYS_ADMIN 后读取 4 字节 01 00 41 FE，EC 身份与 RPM 查询通过。SYS_ADMIN 权限较广，但当前 sysfs PCI 读取接口要求它；monitor 仍移除所有 capabilities。不得跳过 LGMR 校验来规避权限问题。依据：[Linux v6.18 pci_read_config](https://github.com/torvalds/linux/blob/v6.18/drivers/pci/pci-sysfs.c#L694)。其他实机验收项目分别记录。
 
 s6 3.2.3.2 服务位于 `/etc/s6-overlay/s6-rc.d`，bundle 成员位于 `/etc/s6-overlay/user-bundles.d/user/contents.d`。`/run` 必须 exec；错误地设 noexec 会使 s6 init 报 Permission denied。详细锁定依赖与容器测试说明见 [container/README.md](../container/README.md)。

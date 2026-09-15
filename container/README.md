@@ -2,7 +2,8 @@
 
 Production: `docker compose up --build -d` uses `config/container.yaml` (BIOS,
 MQTT disabled). It explicitly maps `/dev/port` read/write, `/dev/mem` read-only,
-host `/sys` read-only and the shared `/run/lock` directory, with `SYS_RAWIO`.
+host `/sys` read-only and the shared `/run/lock` directory, with `SYS_RAWIO` for device access and `SYS_ADMIN` for the LGMR
+read beyond byte 64 of PCI configuration space.
 Review the actual host's access requirements before starting it; no privileged
 fallback is provided. For enabled MQTT, add a read-only password-file bind to
 `/run/secrets/mqtt_password` as shown in `compose.yaml`. Disabled MQTT requires

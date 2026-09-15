@@ -47,7 +47,7 @@ docker compose -f compose.mock.yaml down
 
 以下是完成 [实机验收](docs/acceptance.md) 并获得操作授权后的部署步骤，本次交付未在 NAS 执行。先在目标机器发现热源，编辑 `config/container.yaml` 的稳定 selector、策略和 MQTT 配置，再运行 validate。不要把示例温度和下限视为散热保证。
 
-`compose.yaml` 使用加载后标记的 `ha-nuc9-ec:local`：`/dev/port` 读写、`/dev/mem` 只读、宿主 `/sys` 只读、共享 `/run/lock` 读写，添加 `SYS_RAWIO`。配置只读挂载为 `/config/config.yaml`；rootfs 只读，`/run` 为可执行 tmpfs（s6 必需），`/tmp` 为 noexec tmpfs。不会自动退回 mock 或 privileged。实际内核设备限制仍需目标主机验收。
+`compose.yaml` 使用加载后标记的 `ha-nuc9-ec:local`：`/dev/port` 读写、`/dev/mem` 只读、宿主 `/sys` 只读、共享 `/run/lock` 读写，添加 `SYS_RAWIO`（设备访问）和 `SYS_ADMIN`（读取 PCI 配置中的 LGMR）。配置只读挂载为 `/config/config.yaml`；rootfs 只读，`/run` 为可执行 tmpfs（s6 必需），`/tmp` 为 noexec tmpfs。不会自动退回 mock 或 privileged。实际内核设备限制仍需目标主机验收。
 
 ```sh
 docker compose up --no-build -d
