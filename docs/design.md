@@ -33,9 +33,9 @@
 | --- | --- |
 | fixed | 使用本组配置的固定百分比 |
 | custom | 按温度源、最低温度、最低占空比、每摄氏度增量计算 |
-| cool | 使用本机固件来源的偏冷预设参数 |
-| balanced | 使用本机固件来源的均衡预设参数 |
-| quiet | 使用本机固件来源的安静预设参数 |
+| cool | 60°C、40%起升，每°C增加3个百分点，80°C全速 |
+| balanced | 60°C、40%起升，每°C增加2.4个百分点，85°C全速 |
+| quiet | 60°C、40%起升，每°C增加2个百分点，90°C全速 |
 
 Custom 基础计算定义为：`最低占空比 + max(0, 温度 - 最低温度) × 每摄氏度增量`，再执行上下限、取整与调速平滑。这是本项目明确约定的算法，不冒充完整 EC 算法。
 
@@ -82,7 +82,7 @@ NUC9 实机已经确认：CPU x86_pkg_temp/coretemp、i915 温度、pch_cannonla
 
 因此首版选择 **100ms CPU 轮询**。热源接口预留事件唤醒能力，未来有经过验证的事件源时可提前重算，并继续保留轮询。此次只读调研没有修改 BIOS、EC、thermal trip 或模块参数。
 
-固件 UI 回调已发现 Quiet/Balanced/Cool 最低温度分别为 72/70/68°C，其余参数包括最低 27%、增量 2%/°C、停转温度 50°C。这些是预设来源，尚不能证明 EC 的全部响应、滞回和停转行为。正式发布须版本化保存预设并完成曲线核对，不从其他代 NUC 文档复制数值。
+当前 CPU 预设版本为 `cpu-linear-v1`：三档最低40%，从60°C开始按2/2.4/3个百分点每°C上升，并受输出上限约束。曲线定义由配置校验与策略计算共同使用。旧固件UI派生参数已替换；厂商参考、完整温度表及升级行为见[CPU预设说明](cpu-presets.md)。这些是应用定义的曲线，不等同于BIOS/EC自动算法。
 
 配置模型保留 `fan_off.enabled` 与 `fan_off.temperature_c`，默认禁用。停转、可靠起转以及 40–80% 以外范围须完成实机验证后才开放；不让“可填写”隐含“已经验证”。应用的滤波、滞回和降速延迟明确归入应用行为。
 
@@ -316,13 +316,13 @@ HA实体使用 `<prefix>/command/<entity_id>` 接收标量并映射为同一候�
 - 验证目标不变时不重复写入、首次接管提交、升速及时响应、boost 优先级和降速延迟；实机测量风扇升速时间。
 - MQTT 集成验证发现、HA 重启、broker 断线重连、LWT、过期遥测、保留命令拒绝和运行期配置重置。
 - NAS-11 实机验证两组独立调速、三路 RPM、恢复、长期运行、不同 BIOS 原策略、温度源、容器权限及并发。扩展范围和停转独立验收。
-- 发布前确认预设与 BIOS 的相似程度；没有测量依据时标注“BIOS 参数风格”，不声称行为完全等价。
+- 发布前实测新预设下的温度、PWM与RPM响应；预设标注为应用曲线，不声称与BIOS/EC算法等价。
 
 ## 依据
 
 - 关联任务：分析 NUC9 风扇 PWM 写入端口 (2)，01a09eb2-0d32-7780-a0eb-62eda528bff9（已读取）。
 - [CPU/SYS 分组实测](/Users/timandes/Documents/LLMKB/records/nas11-nuc9-pwm-independent-control.md)
-- [BIOS 字段与预设来源](/Users/timandes/Documents/LLMKB/records/nas11-nuc9-pwm-firmware-analysis.md)
+- [历史 BIOS 字段与 UI 参数映射](/Users/timandes/Documents/LLMKB/records/nas11-nuc9-pwm-firmware-analysis.md)
 - [现有只读 hwmon 项目](/Users/timandes/Projects/fnos/nuc9-ec-hwmon/README.zh_CN.md)
 - [Home Assistant MQTT 与 Discovery](https://www.home-assistant.io/integrations/mqtt/)
 - [Docker 容器重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/)

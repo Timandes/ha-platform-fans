@@ -103,6 +103,15 @@ class CurveConfig(_StrictModel):
     duty_increment_percent_per_c: PositiveFinite
 
 
+# Application CPU profiles, version cpu-linear-v1; see docs/cpu-presets.md.
+# Keep evaluation and cross-field validation on the same curve definitions.
+CPU_PRESETS: dict[str, CurveConfig] = {
+    "quiet": CurveConfig(minimum_temperature_c=60, minimum_duty_percent=40, duty_increment_percent_per_c=2),
+    "balanced": CurveConfig(minimum_temperature_c=60, minimum_duty_percent=40, duty_increment_percent_per_c=2.4),
+    "cool": CurveConfig(minimum_temperature_c=60, minimum_duty_percent=40, duty_increment_percent_per_c=3),
+}
+
+
 class InputConfig(_StrictModel):
     source: str = Field(min_length=1)
     custom: CurveConfig | None = None
@@ -190,7 +199,6 @@ class AppConfig(_StrictModel):
 
     @model_validator(mode="after")
     def validate_policy_references(self) -> AppConfig:
-        presets = {"quiet": 72.0, "balanced": 70.0, "cool": 68.0}
         for fan_name in ("cpufan", "sysfan"):
             fan = getattr(self.fans, fan_name)
             override = fan.override
@@ -209,9 +217,10 @@ class AppConfig(_StrictModel):
                 seen.add(input_config.source)
                 if override.mode == "custom" and input_config.custom is None:
                     raise ValueError(f"{path}.custom is required in custom mode")
-                if override.mode in presets and source.kind != "cpu" and input_config.custom is None:
+                if override.mode in CPU_PRESETS and source.kind != "cpu" and input_config.custom is None:
                     raise ValueError(f"{path}: non-CPU preset input requires custom curve")
-                curve_min = input_config.custom.minimum_temperature_c if input_config.custom else presets.get(override.mode)
+                curve = input_config.custom or CPU_PRESETS.get(override.mode)
+                curve_min = curve.minimum_temperature_c if curve else None
                 if input_config.boost_above_c is not None and curve_min is not None and input_config.boost_above_c <= curve_min:
                     raise ValueError(f"{path}.boost_above_c must be above minimum temperature")
         return self

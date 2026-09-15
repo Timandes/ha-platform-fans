@@ -182,3 +182,24 @@ def test_strict_float_fields_preserve_yaml_integer_numbers(example_config):
     assert changed.fans.cpufan.override.inputs[0].custom.minimum_temperature_c == 46.0
     assert changed.fans.cpufan.override.inputs[0].custom.duty_increment_percent_per_c == 3.0
     assert changed.fans.cpufan.override.inputs[0].boost_above_c == 76.0
+
+
+@pytest.mark.parametrize("mode", ["quiet", "balanced", "cool"])
+def test_preset_boost_validation_uses_current_curve_start(example_config, mode):
+    raw = example_config.model_dump()
+    raw["fans"]["cpufan"]["override"]["mode"] = mode
+    raw["fans"]["cpufan"]["override"]["inputs"] = [
+        {"source": "cpu_package", "boost_above_c": 65}
+    ]
+    cfg = type(example_config).model_validate(raw, context={"normalized_duration": True})
+    assert cfg.fans.cpufan.override.inputs[0].boost_above_c == 65
+    with pytest.raises(ConfigError, match="boost_above_c"):
+        apply_changes(cfg, {"fans.cpufan.override.inputs.0.boost_above_c": 60})
+    # An explicit input curve supplies its own validation threshold.
+    raw["fans"]["cpufan"]["override"]["inputs"][0]["custom"] = {
+        "minimum_temperature_c": 70,
+        "minimum_duty_percent": 40,
+        "duty_increment_percent_per_c": 2,
+    }
+    with pytest.raises(ValidationError, match="boost_above_c"):
+        type(example_config).model_validate(raw, context={"normalized_duration": True})
