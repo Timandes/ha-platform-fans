@@ -47,7 +47,7 @@ fans:
   cpufan:
     minimum_running_duty_percent: 40
     override:
-      mode: cool
+      mode: balanced
       fixed:
         duty_percent: 40
       combine: max

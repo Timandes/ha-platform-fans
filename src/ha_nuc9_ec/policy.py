@@ -4,20 +4,12 @@ import math
 from collections.abc import Mapping
 from fractions import Fraction
 
-from .config import AppConfig, CurveConfig, FanConfig, InputConfig
+from .config import CPU_PRESETS, AppConfig, FanConfig, InputConfig
 from .model import DutyPair, Sample
 
 
 class SourceUnavailable(RuntimeError):
     pass
-
-
-_PRESETS: dict[str, CurveConfig] = {
-    "quiet": CurveConfig(minimum_temperature_c=72, minimum_duty_percent=27, duty_increment_percent_per_c=2),
-    "balanced": CurveConfig(minimum_temperature_c=70, minimum_duty_percent=27, duty_increment_percent_per_c=2),
-    "cool": CurveConfig(minimum_temperature_c=68, minimum_duty_percent=27, duty_increment_percent_per_c=2),
-}
-PRESET_SOURCE_ID = "QXCFL579.0077"
 
 
 def curve_duty(temp: float, minimum_temp: float, minimum: float, slope: float, *, upper: int = 100) -> int:
@@ -60,7 +52,7 @@ def _fan_duty(fan: FanConfig, config: AppConfig, samples: Mapping[str, Sample], 
         sample = _sample(input_config, config, samples, now)
         if input_config.boost_above_c is not None and sample.celsius >= input_config.boost_above_c:
             boosted = True
-        curve = input_config.custom or _PRESETS[override.mode]
+        curve = input_config.custom or CPU_PRESETS[override.mode]
         duties.append(curve_duty(sample.celsius, curve.minimum_temperature_c, curve.minimum_duty_percent, curve.duty_increment_percent_per_c, upper=upper))
     desired = upper if boosted else max(duties)
     return min(upper, max(lower, fan.minimum_running_duty_percent, desired))

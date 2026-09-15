@@ -2,7 +2,7 @@
 
 配置为 `config/nas11/config.yaml`，Compose 为 `compose.nas11.yaml`，检出目录 `/home/timandes/ha-platform-fans`。
 
-- CPU：x86_pkg_temp，100ms 采样，保留实际运行的 cool 策略（68°C起点、27%基础PWM、每°C增加2%），运行下限40%；CPU≥90°C直接请求100%，该阈值在自动曲线模式下生效。这些参数来自NUC9 BIOS预设UI，不等同于固件内部自动算法，停转关闭。
+- CPU：x86_pkg_temp，100ms采样；配置默认balanced，≤60°C为40%，每°C增加2.4个百分点，80°C为88%、85°C达到100%。使用应用预设，停转关闭，见[三档曲线](cpu-presets.md)。保留CPU≥90°C的显式boost，因此HA切换quiet仍按曲线到90°C才全速；balanced/cool在此前已自然达到100%。
 - SYS：PCI地址0000:02:00.0、0000:03:00.0、0000:04:00.0的NVMe Composite温度，1秒采样；三块盘分别算需求，取最大值。48°C及以下30%，超过48°C每°C增加15%，50°C为60%、52°C为90%，约52.7°C达到100%上限，53°C及以上强制100%。PCI地址用于避免hwmon/NVMe编号漂移；更换盘位后重新discover。
 - SYS另增加CPU独立需求曲线：≤40°C需求0%，40–90°C每°C增加2%，≥90°C需求100%；与三块NVMe需求取最大，最终仍受SYS最低30%约束。CPU低温需求0%不代表风扇停转，也不改变CPU风扇自身策略。
 - 立即升速，降速等待10秒。必需热源缺失或过期时请求两组上限100%并退出，s6负责重启；CPU运行下限仍40%，SYS下限30%。
@@ -10,7 +10,7 @@
 - MQTT常规遥测默认每5秒一次，配置项`mqtt.publish_interval`；故障/模式/配置/热源在线状态变化即时发布。CPU100ms采样保持不变。详细行为和Recorder排除示例见[运维说明](operations.md#mqtt-上报频率与-ha-历史)。
 - Docker `restart: unless-stopped`，容器内s6监督。正常停止保留最后PWM（hold）；需要退出覆盖时通过配置/HA切换bios并确认。监督层不写BIOS。
 
-本次后端将原40–80%限制扩展为30–100%，仍拒绝停转、越界值及身份不匹配。旧实机报告仅证明旧范围，不能将其当作新增端点的实测证据。
+先前部署已将后端原40–80%限制扩展为30–100%，仍拒绝停转、越界值及身份不匹配。旧实机报告仅证明旧范围，不能将其当作新增端点的实测证据。
 
 ```sh
 docker compose -f compose.nas11.yaml up --no-build -d
@@ -40,6 +40,11 @@ docker compose -f compose.nas11.yaml exec controller ha-nuc9-ec health
 
 新镜像归档位于NAS `dist/nvme-deploy-20260915/ha-platform-fans-nas11-nvme.tar`（169027584字节，SHA256 `9fd3f6778fafc9917fd2c5ba240e7e98e228b030e60db45f66b3f29575fc9f73`）。原始试验、MQTT快照、构建及启动日志也位于该目录。长时压力、重启/恢复及完整生产发布门槛仍未完成。
 
-## CPU 高温全速阈值修复
+## 先前 CPU 高温全速阈值修复（历史记录）
 
-旧预设没有设置CPU boost，Cool在100°C仍仅计算91%；驱动报告的临界温度为100°C。现在配置增加 `fans.cpufan.override.inputs[0].boost_above_c: 90`，使用现有策略引擎立即请求100%，降速仍等待10秒。保留运行时已选择的cool，并写入文件以便重启后保持一致。SYS曲线不变，不需要重建镜像。
+旧预设没有设置CPU boost，Cool在100°C仍仅计算91%；驱动报告的临界温度为100°C。当时配置增加 `fans.cpufan.override.inputs[0].boost_above_c: 90`，使用现有策略引擎立即请求100%，降速仍等待10秒。保留运行时已选择的cool，并写入文件以便重启后保持一致。SYS曲线不变，不需要重建镜像。
+
+
+## CPU预设更新的部署边界
+
+本文顶部描述仓库当前配置，新三档曲线尚未完成NAS实机验收；上述部署日志是历史结果。预设位于应用代码中，升级需要重新构建/导入镜像并重建容器，仅SIGHUP或替换YAML不能更新旧镜像里的预设。配置文件默认balanced，重启会回到该基线；应用升级后，所有省略custom的CPU预设输入都会采用新参数，包括HA随后切换的模式。SYS各输入保留显式custom，曲线不受本次预设更新影响。

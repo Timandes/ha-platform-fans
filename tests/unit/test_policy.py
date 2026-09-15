@@ -1,6 +1,6 @@
 import pytest
 
-from ha_nuc9_ec.config import apply_changes, load_config
+from ha_nuc9_ec.config import AppConfig, apply_changes
 from ha_nuc9_ec.model import DutyPair, Sample
 from ha_nuc9_ec.policy import DownshiftGate, SourceUnavailable, calculate, curve_duty
 
@@ -24,20 +24,46 @@ def test_curve_rounds_up_and_result_clips_to_upper_bound(example_config):
     assert result == DutyPair(75, 75)
 
 
+@pytest.mark.parametrize("mode,column", [("quiet", 0), ("balanced", 1), ("cool", 2)])
+@pytest.mark.parametrize("temp,expected", [
+    (40, (40, 40, 40)),
+    (60, (40, 40, 40)),
+    (65, (50, 52, 55)),
+    (70, (60, 64, 70)),
+    (75, (70, 76, 85)),
+    (79, (78, 86, 97)),
+    (80, (80, 88, 100)),
+    (84, (88, 98, 100)),
+    (85, (90, 100, 100)),
+    (89, (98, 100, 100)),
+    (90, (100, 100, 100)),
+    (100, (100, 100, 100)),
+])
+def test_cpu_presets_ramp_to_full_speed_without_boost(example_config, mode, column, temp, expected):
+    raw = example_config.model_dump()
+    raw["control"]["mode"] = "override"
+    raw["fans"]["cpufan"]["minimum_running_duty_percent"] = 30
+    raw["fans"]["cpufan"]["override"]["mode"] = mode
+    raw["fans"]["cpufan"]["override"]["inputs"] = [{"source": "cpu_package"}]
+    raw["fans"]["sysfan"]["override"]["mode"] = "fixed"
+    cfg = AppConfig.model_validate(raw, context={"normalized_duration": True})
+    samples = {"cpu_package": Sample("cpu_package", temp, 2, None)}
+    assert calculate(cfg, samples, now=2, bounds=(30, 100)).cpu == expected[column]
+    # Driver limits still win over every preset, including its 40% baseline.
+    assert calculate(cfg, samples, now=2, bounds=(50, 80)).cpu == min(80, max(50, expected[column]))
+
+
 @pytest.mark.parametrize("mode", ["quiet", "balanced", "cool"])
-def test_bios_style_presets_use_firmware_curves_and_device_floor(example_path, tmp_path, mode):
-    candidate = tmp_path / f"{mode}.yaml"
-    text = example_path.read_text().replace("mode: bios", "mode: override", 1).replace("mode: custom", f"mode: {mode}", 1)
-    text = text.replace("          custom:\n            minimum_temperature_c: 47\n            minimum_duty_percent: 40\n            duty_increment_percent_per_c: 2\n", "", 1)
-    text = text.replace("          boost_above_c: 75\n", "", 1)
-    candidate.write_text(text)
-    cfg = load_config(candidate)
-    result = calculate(cfg, {
-        "cpu_package": Sample("cpu_package", 80, 2, None),
-        "pch": Sample("pch", 50, 2, None),
-    }, now=2, bounds=(40, 80))
-    expected = {"quiet": 43, "balanced": 47, "cool": 51}[mode]
-    assert result.cpu == expected
+def test_explicit_cpu_curve_overrides_preset(example_config, mode):
+    cfg = apply_changes(example_config, {
+        "control.mode": "override",
+        "fans.cpufan.override.mode": mode,
+        "fans.cpufan.override.inputs.0.boost_above_c": None,
+        "fans.sysfan.override.mode": "fixed",
+    })
+    # Explicit example curve remains 47°C / 40% / 2, independent of the preset.
+    samples = {"cpu_package": Sample("cpu_package", 60, 2, None)}
+    assert calculate(cfg, samples, now=2, bounds=(30, 100)).cpu == 66
 
 
 def test_fixed_mode_does_not_require_samples_or_activate_boost(example_config):

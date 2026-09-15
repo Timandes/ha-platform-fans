@@ -2,7 +2,7 @@
 
 NUC9 Linux amd64 风扇控制候选版本：CPU 一组、双 SYS 共用一组 PWM，三路 RPM；本地策略通过 MQTT Discovery 接入 Home Assistant。已完成无硬件验证及[首轮在线实机验收](docs/acceptance-nas11-20260915.md)，**尚未完成本项目的实机写入发布验收，不宣称生产可用**。交付归档、源码提交、image ID、依赖版本与 SHA256 见 `dist/manifest.json`；分阶段证据见 [验收说明](docs/acceptance.md)。
 
-支持全局 `bios` / `override`，覆盖时两组分别选择 `fixed/custom/cool/balanced/quiet`。预设是 BIOS 参数风格，不承诺与 EC 自动算法等价。Linux 后端只接受 NUC9i7QNB / QXCFL579.0071.2022.1130.1331 / SPG_EC / EC 244400 / LGMR 0xFE410001，输出限定 30–100%；模拟算法可覆盖 0–100%，首版禁止停转。
+支持全局 `bios` / `override`，覆盖时两组分别选择 `fixed/custom/cool/balanced/quiet`。三档 CPU 预设从60°C、40%起升，quiet/balanced/cool分别在90/85/80°C达到全速；这是应用曲线，见[参数与迁移说明](docs/cpu-presets.md)。Linux 后端只接受 NUC9i7QNB / QXCFL579.0071.2022.1130.1331 / SPG_EC / EC 244400 / LGMR 0xFE410001，输出限定 30–100%；模拟算法可覆盖 0–100%，首版禁止停转。
 
 ## 配置与无硬件启动
 
