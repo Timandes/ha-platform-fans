@@ -92,3 +92,11 @@ recorder:
 ```
 
 `commit_interval`只改变事务提交频率，不会减少记录条数；容量需结合排除项和保留天数控制。运行前评估记录于LLMKB `records/nas11-mqtt-io-assessment.md`。
+
+## 自动升速等待
+
+在 `fans.<风扇>.override.inputs[]` 中设置 `increase_delay: 1s` 或 `5s`，仅影响该风扇的该输入。省略或设为null保留立即升速，其他值需带ms/s单位且大于零；本字段通过文件配置，不新增MQTT编辑入口。
+
+先把每路温度映射为PWM需求，再与该风扇已确认PWM比较。需求持续更高且等待到期才允许该输入推高，使用到期时的需求；低于或等于当前PWM、无效样本均打断计时，即便低温样本位于两个合并的控制周期之间。每个输入各自计时，不能由CPU和NVMe交替尖峰拼成连续升温。确认PWM改变后重新开始下一次升速计时。
+
+显式 `boost_above_c` 阈值与 `max_then_exit` 故障保护立即生效；曲线自然达到100%但未达到boost阈值时仍等待。fixed、启动首次目标和人工配置/策略提交仍立即应用；成功配置更新或切换BIOS清空等待计时。原 `control.decrease_delay` 降速机制保持不变。温度采样和MQTT上报间隔与此计时独立。

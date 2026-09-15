@@ -54,6 +54,7 @@ fans:
       inputs:
       - source: cpu_package
         boost_above_c: 90
+        increase_delay: 1s
       fan_off:
         enabled: false
         temperature_c: 0
@@ -71,24 +72,28 @@ fans:
           minimum_duty_percent: 30
           duty_increment_percent_per_c: 15
         boost_above_c: 53
+        increase_delay: 5s
       - source: nvme_03
         custom:
           minimum_temperature_c: 48
           minimum_duty_percent: 30
           duty_increment_percent_per_c: 15
         boost_above_c: 53
+        increase_delay: 5s
       - source: nvme_04
         custom:
           minimum_temperature_c: 48
           minimum_duty_percent: 30
           duty_increment_percent_per_c: 15
         boost_above_c: 53
+        increase_delay: 5s
       - source: cpu_package
         custom:
           minimum_temperature_c: 40
           minimum_duty_percent: 0
           duty_increment_percent_per_c: 2
         boost_above_c: 90
+        increase_delay: 5s
       fan_off:
         enabled: false
         temperature_c: 0

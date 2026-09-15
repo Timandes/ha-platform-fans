@@ -116,6 +116,12 @@ class InputConfig(_StrictModel):
     source: str = Field(min_length=1)
     custom: CurveConfig | None = None
     boost_above_c: Finite | None = None
+    increase_delay: PositiveFinite | None = None
+
+    @field_validator("increase_delay", mode="before", json_schema_input_type=str | None)
+    @classmethod
+    def parse_increase_delay(cls, value: object, info: ValidationInfo):
+        return None if value is None else _duration(value, info)
 
 
 class FixedConfig(_StrictModel):

@@ -232,6 +232,18 @@
           ],
           "default": null,
           "title": "Boost Above C"
+        },
+        "increase_delay": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Increase Delay"
         }
       },
       "required": [

@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from .config import AppConfig, ConfigError, apply_changes
 from .hardware.base import Backend, HardwareError, PreflightError
 from .model import CommandResult, DutyPair, Sample, StateSnapshot
-from .policy import DownshiftGate, SourceUnavailable, calculate
+from .policy import DownshiftGate, UpshiftGate, SourceUnavailable, calculate
 
 
 class TemporaryFailure(RuntimeError):
@@ -62,6 +62,7 @@ class Controller:
         self._identified = False
         self._closed = False
         self._gate = DownshiftGate(config.control.decrease_delay)
+        self._upshift = UpshiftGate()
         self._commands: deque = deque()
         self._periodic = None
         self._rpm_job = None
@@ -101,6 +102,8 @@ class Controller:
                              self._config.model_dump(mode='json'), copy.deepcopy(self._last_success))
 
     def on_sample(self, sample: Sample) -> None:
+        if self._duty is not None and self._config.control.mode == 'override':
+            self._upshift.observe(self._config, sample, self.clock(), self.backend.duty_bounds, self._duty)
         self._samples[sample.source_id] = sample
         if sample.error is None and sample.celsius is not None:
             self._last_success[sample.source_id] = sample.read_at
@@ -213,6 +216,7 @@ class Controller:
                 await self._hardware(self.backend.restore_bios)
             self._duty, self._applied, self._state = None, 'bios', 'bios'
             self._gate = DownshiftGate(candidate.control.decrease_delay)
+            self._upshift = UpshiftGate()
         else:
             try:
                 desired = calculate(candidate, samples, self.clock(), self.backend.duty_bounds)
@@ -223,6 +227,7 @@ class Controller:
             await self._hardware(self.backend.set_duty, desired)
             self._duty, self._applied, self._state = desired, 'override', 'override'
             self._gate = DownshiftGate(candidate.control.decrease_delay)
+            self._upshift = UpshiftGate()
             self._gate.apply(desired, self.clock(), immediate=True)
 
     async def _configuration_command(self, make_candidate, request_id: str, payload, samples=None, commit=None):
@@ -315,12 +320,13 @@ class Controller:
                 raise TemporaryFailure('controller has not started')
             if self._config.control.mode == 'override':
                 try:
-                    desired = calculate(self._config, self._samples, self.clock(), self.backend.duty_bounds)
+                    desired = self._upshift.apply(self._config, self._samples, self.clock(), self.backend.duty_bounds, self._duty)
                 except SourceUnavailable as error:
                     await self._sensor_failure(error)
                 target = self._gate.apply(desired, self.clock())
                 if target != self._duty:
                     await self._hardware(self.backend.set_duty, target)
+                    self._upshift.confirmed(self._duty, target)
                     self._duty = target
             self._completed()
         await self._submit('periodic', operation)
