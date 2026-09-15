@@ -66,21 +66,21 @@ fans:
       inputs:
       - source: nvme_02
         custom:
-          minimum_temperature_c: 45
+          minimum_temperature_c: 48
           minimum_duty_percent: 30
-          duty_increment_percent_per_c: 8.75
+          duty_increment_percent_per_c: 15
         boost_above_c: 53
       - source: nvme_03
         custom:
-          minimum_temperature_c: 45
+          minimum_temperature_c: 48
           minimum_duty_percent: 30
-          duty_increment_percent_per_c: 8.75
+          duty_increment_percent_per_c: 15
         boost_above_c: 53
       - source: nvme_04
         custom:
-          minimum_temperature_c: 45
+          minimum_temperature_c: 48
           minimum_duty_percent: 30
-          duty_increment_percent_per_c: 8.75
+          duty_increment_percent_per_c: 15
         boost_above_c: 53
       fan_off:
         enabled: false
