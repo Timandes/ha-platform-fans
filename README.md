@@ -1,6 +1,6 @@
 # ha-nuc9-ec
 
-NUC9 Linux amd64 风扇控制候选版本：CPU 一组、双 SYS 共用一组 PWM，三路 RPM；本地策略通过 MQTT Discovery 接入 Home Assistant。当前完成的是无硬件模拟与容器验证，**尚未完成本项目的实机写入发布验收，不宣称生产可用**。交付归档、源码提交、image ID、依赖版本与 SHA256 见 `dist/manifest.json`；分阶段证据见 [验收说明](docs/acceptance.md)。
+NUC9 Linux amd64 风扇控制候选版本：CPU 一组、双 SYS 共用一组 PWM，三路 RPM；本地策略通过 MQTT Discovery 接入 Home Assistant。已完成无硬件验证及[首轮在线实机验收](docs/acceptance-nas11-20260915.md)，**尚未完成本项目的实机写入发布验收，不宣称生产可用**。交付归档、源码提交、image ID、依赖版本与 SHA256 见 `dist/manifest.json`；分阶段证据见 [验收说明](docs/acceptance.md)。
 
 支持全局 `bios` / `override`，覆盖时两组分别选择 `fixed/custom/cool/balanced/quiet`。预设是 BIOS 参数风格，不承诺与 EC 自动算法等价。Linux 后端只接受 NUC9i7QNB / QXCFL579.0071.2022.1130.1331 / SPG_EC / EC 244400 / LGMR 0xFE410001，输出限定 40–80%；模拟算法可覆盖 0–100%，首版禁止停转。
 
@@ -45,7 +45,7 @@ docker compose -f compose.mock.yaml down
 
 ## 实机部署配置
 
-以下是完成 [实机验收](docs/acceptance.md) 并获得操作授权后的部署步骤，本次交付未在 NAS 执行。先在目标机器发现热源，编辑 `config/container.yaml` 的稳定 selector、策略和 MQTT 配置，再运行 validate。不要把示例温度和下限视为散热保证。
+以下是完成 [实机验收](docs/acceptance.md) 并获得操作授权后的部署步骤。NAS-11 已完成[首轮在线验收](docs/acceptance-nas11-20260915.md)，完整生产发布验收仍未完成。先在目标机器发现热源，编辑 `config/container.yaml` 的稳定 selector、策略和 MQTT 配置，再运行 validate。不要把示例温度和下限视为散热保证。
 
 `compose.yaml` 使用加载后标记的 `ha-nuc9-ec:local`：`/dev/port` 读写、`/dev/mem` 只读、宿主 `/sys` 只读、共享 `/run/lock` 读写，添加 `SYS_RAWIO`（设备访问）和 `SYS_ADMIN`（读取 PCI 配置中的 LGMR）。配置只读挂载为 `/config/config.yaml`；rootfs 只读，`/run` 为可执行 tmpfs（s6 必需），`/tmp` 为 noexec tmpfs。不会自动退回 mock 或 privileged。实际内核设备限制仍需目标主机验收。
 
