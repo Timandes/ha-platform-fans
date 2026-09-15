@@ -160,6 +160,10 @@ class TLSConfig(_StrictModel):
 
 
 class MQTTConfig(_StrictModel):
+    # Keep old configuration files valid; external durations retain explicit units.
+    publish_interval: PositiveFinite = Field(default=5.0, json_schema_extra={"default": "5s"})
+    _parse_publish_interval = field_validator("publish_interval", mode="before", json_schema_input_type=str)(_duration)
+
     enabled: StrictBool
     broker: str = Field(pattern=r"^(?:tcp|ssl)://[^\s/]+:\d{1,5}$")
     client_id: str = Field(min_length=1)

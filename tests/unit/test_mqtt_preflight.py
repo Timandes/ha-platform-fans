@@ -40,7 +40,7 @@ async def test_mismatched_client_key_is_rejected_before_backend_without_prompt(e
     raw = example_config.mqtt.model_dump(mode='python')
     raw.update(enabled=True, broker='ssl://localhost:8883', username=None, password_file=None,
                tls={'ca_file': str(cert), 'certificate_file': str(cert), 'key_file': str(other_key)})
-    mqtt_config = type(example_config.mqtt).model_validate(raw)
+    mqtt_config = type(example_config.mqtt).model_validate(raw, context={"normalized_duration": True})
     with pytest.raises(ValueError, match='invalid MQTT TLS certificate configuration'):
         prepare_mqtt(mqtt_config)
     app_raw = example_config.model_dump(mode='python')

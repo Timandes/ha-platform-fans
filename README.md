@@ -45,6 +45,8 @@ docker compose -f compose.mock.yaml down
 
 NAS-11 的 CPU balanced / NVMe SYS 曲线及 MQTT 部署见[部署说明](docs/nas11-deployment.md)。
 
+MQTT常规遥测默认每5秒发布最新状态（`mqtt.publish_interval: 5s`），故障和控制配置变化即时上报；本地温控采样不降频。见[MQTT与历史记录说明](docs/operations.md#mqtt-上报频率与-ha-历史)。
+
 ## 实机部署配置
 
 以下是完成 [实机验收](docs/acceptance.md) 并获得操作授权后的部署步骤。NAS-11 已完成[首轮在线验收](docs/acceptance-nas11-20260915.md)，完整生产发布验收仍未完成。先在目标机器发现热源，编辑 `config/container.yaml` 的稳定 selector、策略和 MQTT 配置，再运行 validate。不要把示例温度和下限视为散热保证。
